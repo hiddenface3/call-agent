@@ -10,6 +10,14 @@
  *   - SSE Real-time Transcript & State Streaming to Apex React Frontend
  */
 
+try {
+  if (typeof process.loadEnvFile === 'function') {
+    process.loadEnvFile();
+  }
+} catch (e) {
+  // Ignore missing .env
+}
+
 const http = require('http');
 const https = require('https');
 const { URL } = require('url');
@@ -166,6 +174,7 @@ const server = http.createServer((req, res) => {
           systemPrompt = 'You are Sarah, property acquisition specialist.',
           amdStrategy = 'voicemail_drop',
           voicemailScript,
+          publicRelayUrl,
         } = payload;
 
         if (!to) {
@@ -188,12 +197,15 @@ const server = http.createServer((req, res) => {
           systemPrompt,
           amdStrategy,
           voicemailScript,
+          publicRelayUrl,
           sseClients: [],
           status: 'initiating',
           geminiWs: null,
           telnyxWs: null,
           audioQueue: [],
           isHumanVerified: false,
+          hasSpokenGreeting: false,
+          pendingGreetingTrigger: false,
           leadData: {},
         };
 
@@ -202,6 +214,12 @@ const server = http.createServer((req, res) => {
         // If Telnyx API Key and Connection ID are provided, trigger real Telnyx Call Control v2
         if (apiKey && connectionId) {
           try {
+            const rawPublicHost = publicRelayUrl || process.env.PUBLIC_RELAY_URL || req.headers.host;
+            const cleanHost = rawPublicHost.replace(/^https?:\/\//i, '').replace(/^wss?:\/\//i, '').replace(/\/+$/, '');
+            const isHttps = Boolean(publicRelayUrl || process.env.PUBLIC_RELAY_URL || req.headers['x-forwarded-proto'] === 'https' || rawPublicHost.includes('trycloudflare.com') || rawPublicHost.includes('ngrok'));
+            const wsProto = isHttps ? 'wss' : 'ws';
+            const httpProto = isHttps ? 'https' : 'http';
+
             const telnyxReqBody = JSON.stringify({
               to: to.replace(/[^\d+]/g, ''),
               from: from ? from.replace(/[^\d+]/g, '') : '+15125550199',
@@ -211,13 +229,15 @@ const server = http.createServer((req, res) => {
                 total_analysis_time_millis: 5000,
                 after_greeting_silence_millis: 1200,
               },
-              stream_url: `wss://${req.headers.host}/telnyx-media`,
+              stream_url: `${wsProto}://${cleanHost}/telnyx-media`,
               stream_track: 'both_tracks',
               stream_bidirectional_mode: 'rtp',
               stream_bidirectional_codec: 'PCMU',
-              webhook_url: `http://${req.headers.host}/api/telnyx/webhooks`,
+              webhook_url: `${httpProto}://${cleanHost}/api/telnyx/webhooks`,
               client_state: Buffer.from(JSON.stringify({ callControlId })).toString('base64'),
             });
+
+            console.log(`[Telnyx Dial Trigger] stream_url: ${wsProto}://${cleanHost}/telnyx-media`);
 
             const tReq = https.request('https://api.telnyx.com/v2/calls', {
               method: 'POST',
@@ -231,6 +251,15 @@ const server = http.createServer((req, res) => {
               tRes.on('data', d => { tData += d; });
               tRes.on('end', () => {
                 console.log(`[Telnyx Dial Response] Code: ${tRes.statusCode}`);
+                try {
+                  const parsed = JSON.parse(tData || '{}');
+                  const realCallControlId = parsed?.data?.call_control_id;
+                  if (realCallControlId) {
+                    console.log(`[Telnyx Real Call Control ID]: ${realCallControlId} mapped to session ${callControlId}`);
+                    session.realCallControlId = realCallControlId;
+                    activeCalls.set(realCallControlId, session);
+                  }
+                } catch (e) {}
               });
             });
 
@@ -376,12 +405,14 @@ const server = http.createServer((req, res) => {
         if (session) {
           if (eventType === 'call.answered') {
             broadcastCallEvent(session, { type: 'call_answered' });
+            triggerAgentGreeting(session);
           } else if (eventType === 'call.machine.premium.detection.ended') {
             const result = payload?.result; // "human", "machine", "silence", "fax_detected"
             broadcastCallEvent(session, { type: 'amd_result', result });
 
             if (result === 'human') {
               session.isHumanVerified = true;
+              triggerAgentGreeting(session);
             } else if (result === 'machine' && session.amdStrategy === 'hangup_on_machine') {
               // Hang up immediately to save minutes
               broadcastCallEvent(session, { type: 'call_completed', reason: 'Machine detected (Hangup strategy)' });
@@ -393,7 +424,15 @@ const server = http.createServer((req, res) => {
             if (session.geminiWs && session.geminiWs.readyState === WebSocket.OPEN) {
               const dropScript = session.voicemailScript || 'Hi, this is Sarah from Property Care. Please give me a call back regarding your property. Thanks!';
               session.geminiWs.send(JSON.stringify({
-                realtimeInput: { text: `The answering machine beeped. Speak aloud this voicemail message now: "${dropScript}"` }
+                clientContent: {
+                  turns: [
+                    {
+                      role: 'user',
+                      parts: [{ text: `The answering machine beeped. Speak aloud this voicemail message now: "${dropScript}"` }],
+                    },
+                  ],
+                  turnComplete: true,
+                },
               }));
             }
           } else if (eventType === 'call.hangup') {
@@ -430,6 +469,41 @@ function broadcastCallEvent(session, eventObj) {
 // ============================================================================
 // Google Gemini Live WebSocket Bridge (Speech-to-Speech + Option A Tool Call)
 // ============================================================================
+function triggerAgentGreeting(session) {
+  if (!session) return;
+  if (session.hasSpokenGreeting) return;
+
+  if (!session.geminiWs || session.geminiWs.readyState !== WebSocket.OPEN || !session.setupComplete) {
+    session.pendingGreetingTrigger = true;
+    console.log(`[Gemini Live Greeting Queued] Waiting for setupComplete for call ${session.callControlId}`);
+    return;
+  }
+
+  session.hasSpokenGreeting = true;
+  session.pendingGreetingTrigger = false;
+
+  const greetingPrompt = `The phone call has connected to the homeowner. Speak aloud immediately now to greet the homeowner and introduce yourself according to your instructions: "${session.systemPrompt || 'Hi, this is Sarah from Property Care. Are you open to considering selling your property for the best price?'}"`;
+
+  const startMsg = {
+    clientContent: {
+      turns: [
+        {
+          role: 'user',
+          parts: [{ text: greetingPrompt }],
+        },
+      ],
+      turnComplete: true,
+    },
+  };
+
+  try {
+    console.log(`[Gemini Live Greeting Dispatched] for call ${session.callControlId}`);
+    session.geminiWs.send(JSON.stringify(startMsg));
+  } catch (err) {
+    console.error('[Gemini Live Greeting Send Error]:', err);
+  }
+}
+
 function initGeminiLiveSession(session) {
   const apiKey = session.geminiApiKey || process.env.GEMINI_API_KEY;
   if (!apiKey) {
@@ -438,7 +512,7 @@ function initGeminiLiveSession(session) {
   }
 
   const modelId = session.model || 'gemini-3.1-flash-live-preview';
-  const url = `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent?key=${apiKey}`;
+  const url = `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=${apiKey}`;
 
   const geminiWs = new WebSocket(url);
   session.geminiWs = geminiWs;
@@ -492,6 +566,14 @@ function initGeminiLiveSession(session) {
   geminiWs.on('message', (data) => {
     try {
       const msg = JSON.parse(data.toString());
+      if (msg.setupComplete) {
+        session.setupComplete = true;
+        console.log(`[Gemini Live Setup Complete] for call ${session.callControlId}`);
+        if (session.pendingGreetingTrigger || session.isHumanVerified) {
+          triggerAgentGreeting(session);
+        }
+        return;
+      }
       const serverContent = msg?.serverContent;
       if (!serverContent) return;
 
@@ -612,8 +694,26 @@ wss.on('connection', (ws) => {
         const callControlId = data.call_control_id || data.start?.call_control_id;
         console.log(`[Telnyx Media Start] Call Control ID: ${callControlId}`);
         currentSession = activeCalls.get(callControlId);
+
+        // Fallback: check client_state if available
+        const rawState = data.client_state || data.start?.client_state;
+        if (!currentSession && rawState) {
+          try {
+            const decoded = JSON.parse(Buffer.from(rawState, 'base64').toString('utf8'));
+            if (decoded.callControlId) {
+              currentSession = activeCalls.get(decoded.callControlId);
+              if (currentSession && callControlId) {
+                activeCalls.set(callControlId, currentSession);
+              }
+            }
+          } catch (e) {}
+        }
+
         if (currentSession) {
           currentSession.telnyxWs = ws;
+          console.log(`[Telnyx Media Attached] to session ${currentSession.callControlId}`);
+        } else {
+          console.warn(`[Telnyx Media Warning] Could not find session for callControlId: ${callControlId}`);
         }
       }
     } catch (e) {

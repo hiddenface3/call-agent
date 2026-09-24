@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "relay": "node server/telnyxRelay.js",
+    "tunnel": ".\\cloudflared.exe tunnel --url http://localhost:3001",
     "build": "tsc && vite build",
     "build:electron": "tsc -p tsconfig.electron.json",
     "electron:dev": "concurrently -k \"vite\" \"cross-env NODE_ENV=development wait-on tcp:5173 && electron .\"",

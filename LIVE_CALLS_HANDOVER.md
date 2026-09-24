@@ -10,48 +10,35 @@
 | :--- | :--- | :---: | :--- |
 | **Vite Frontend & CRM** | [http://localhost:5173](http://localhost:5173) | 🟢 **ACTIVE** | `npm run dev` |
 | **Telnyx PSTN Relay** | [http://localhost:3001](http://localhost:3001) | 🟢 **ACTIVE** | `npm run relay` |
-| **Relay Health API** | [http://localhost:3001/api/health](http://localhost:3001/api/health) | 🟢 **`{"status":"ok"}`** | Verified |
+| **Cloudflare Public Tunnel** | [https://actions-commentary-machine-choir.trycloudflare.com](https://actions-commentary-machine-choir.trycloudflare.com) | 🟢 **ACTIVE** | `npm run tunnel` |
+| **Relay Health API** | [https://actions-commentary-machine-choir.trycloudflare.com/api/health](https://actions-commentary-machine-choir.trycloudflare.com/api/health) | 🟢 **`{"status":"ok"}`** | Verified |
 
 ---
 
-## 🛠️ 2. The 4 Relay Code Fixes Needed (`server/telnyxRelay.js`)
+## 🛠️ 2. The 4 Relay Code Fixes (`server/telnyxRelay.js`) — ALL APPLIED ✅
 
-To bridge real Telnyx carrier audio to Google Gemini Live without packet drops:
+All 4 critical telephony bridge patches have been applied and tested:
 
-### 🐛 Patch 1: Dynamic Public Tunnel URL (Lines 214–218)
-* **Problem**: Hardcodes `req.headers.host` (`localhost:3001`), which Telnyx cloud cannot reach.
-* **Fix**: Support public tunnel URL (from request payload or `PUBLIC_RELAY_URL` env variable):
-  ```javascript
-  const publicHost = payload.publicRelayUrl 
-    ? payload.publicRelayUrl.replace(/^https?:\/\//, '') 
-    : req.headers.host;
+### ✅ Patch 1: Dynamic Public Tunnel URL (Applied)
+* **What was fixed**: Replaced hardcoded `req.headers.host` with dynamic `publicRelayUrl` payload support and `PUBLIC_RELAY_URL` environment fallback. Telnyx media stream and webhook URLs now route seamlessly through the Cloudflare tunnel (`wss://.../telnyx-media` and `https://.../api/telnyx/webhooks`).
 
-  stream_url: `wss://${publicHost}/telnyx-media`,
-  webhook_url: `https://${publicHost}/api/telnyx/webhooks`,
-  ```
+### ✅ Patch 2: Real Telnyx Call Control ID Mapping (Applied)
+* **What was fixed**: Captured Telnyx's returned `data.call_control_id` on dial and base64-decoded `client_state` on WebSocket connection. Both IDs are now mapped into `activeCalls`, preventing audio drops.
 
-### 🐛 Patch 2: Real Telnyx Call Control ID Mapping (Lines 229–235 & 611–618)
-* **Problem**: Server keys `activeCalls` with random string `telnyx-17...`. Telnyx connects WebSocket using its real `v3:...` ID, causing `activeCalls.get()` to return `undefined`.
-* **Fix**: Save Telnyx's returned `data.call_control_id` on dial and decode `client_state` on WebSocket connection.
+### ✅ Patch 3: Opening Greeting Trigger on Answer (Applied)
+* **What was fixed**: Implemented `triggerAgentGreeting(session)` which sends a formatted `clientContent` turn to Gemini Live on `call.answered` / human verification so the AI agent speaks immediately.
 
-### 🐛 Patch 3: Opening Greeting Trigger on Answer (Lines 377–380)
-* **Problem**: When homeowner answers ("Hello?"), Gemini Live waits silently because no opening turn was sent.
-* **Fix**: On `call.answered` webhook, send standard `clientContent` turn to Gemini Live to speak Sarah's opening script immediately.
-
-### 🐛 Patch 4: Update Gemini Endpoint to `v1beta` (Line 441)
-* **Problem**: Uses deprecated `v1alpha` GenerativeService endpoint.
-* **Fix**: Change `v1alpha` to `v1beta`.
+### ✅ Patch 4: Update Gemini Endpoint to `v1beta` (Applied)
+* **What was fixed**: Upgraded Gemini Live WebSocket URL from deprecated `v1alpha` to official `v1beta` `BidiGenerateContent`. Also corrected voicemail drop message structure to standard `clientContent` turn.
 
 ---
 
 ## 🌐 3. Public Networking (Cloudflare Tunnel)
 
-Run in a separate terminal to give Telnyx access to your local machine:
-```bash
-# Free, zero-setup public HTTPS/WSS tunnel
-cloudflared tunnel --url http://localhost:3001
-```
-*Copy the generated URL (e.g. `https://xyz-abc.trycloudflare.com`) into the App Settings.*
+The tunnel is installed locally via portable binary `cloudflared.exe` and is currently running:
+* **Active Public Tunnel URL**: `https://actions-commentary-machine-choir.trycloudflare.com`
+* **Target**: `http://localhost:3001`
+* **Restart Command**: `npm run tunnel`
 
 ---
 
@@ -74,7 +61,7 @@ cloudflared tunnel --url http://localhost:3001
    * Paste your **Telnyx API Key**.
    * Paste your **Connection ID**.
    * Paste your **Purchased Phone Number** (E.164 format: `+1XXXXXXXXXX`).
-   * Paste your **Public Cloudflare Tunnel URL**.
+   * Verify your **Public Cloudflare Tunnel URL** (auto-prefilled: `https://actions-commentary-machine-choir.trycloudflare.com`).
    * Click **Save Settings**.
 3. In the main **Call Hero** interface:
    * Switch mode to **Real Outbound Call (Telnyx PSTN)**.

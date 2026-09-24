@@ -68,6 +68,7 @@ export class TelnyxClientService {
           initialNode: payload.flow.nodes.find(n => n.id === payload.flow.initialNodeId) || payload.flow.nodes[0],
           amdStrategy: payload.config.telnyxAmdStrategy || 'voicemail_drop',
           voicemailScript: payload.config.telnyxVoicemailScript,
+          publicRelayUrl: payload.config.telnyxRelayUrl,
         }),
       });
 
