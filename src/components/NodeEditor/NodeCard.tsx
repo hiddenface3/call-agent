@@ -12,6 +12,8 @@ import {
   Plus,
   Unlink,
   GripVertical,
+  Target,
+  Database,
 } from 'lucide-react';
 
 interface NodeCardProps {
@@ -165,30 +167,25 @@ export const NodeCard: React.FC<NodeCardProps> = ({
         </div>
 
         <div className="min-h-[64px] max-h-[85px] p-2.5 rounded-xl bg-slate-50 border border-slate-200/80 text-[11px] text-slate-700 leading-relaxed overflow-y-auto font-sans">
-          &quot;{node.agentPrompt}&quot;
+          &quot;{node.agentPrompt.replace(/\{\{[^}]*\}\}/g, '').replace(/\s{2,}/g, ' ').trim()}&quot;
         </div>
 
-        {/* Extraction Tags Badge */}
-        {(() => {
-          const tags = [...node.agentPrompt.matchAll(/\{\{([a-zA-Z0-9_\s-]+)\}\}/g)].map((m) => m[1].trim());
-          if (tags.length === 0) return null;
-          return (
-            <div className="flex items-center gap-1.5 flex-wrap pt-0.5">
-              <span className="text-[9px] font-bold text-indigo-700 uppercase tracking-wider flex items-center gap-1">
-                <Sparkles className="w-2.5 h-2.5 text-indigo-600" />
-                Extracts:
-              </span>
-              {tags.map((t, idx) => (
-                <span
-                  key={idx}
-                  className="px-1.5 py-0.5 rounded-md bg-indigo-50 border border-indigo-200 text-indigo-700 font-mono text-[9px] font-bold truncate max-w-[130px]"
-                >
-                  {`{{${t}}}`}
-                </span>
-              ))}
-            </div>
-          );
-        })()}
+        {/* Dedicated Data Capture Variable Badge */}
+        {node.targetVariable && (
+          <div className="flex items-center gap-1.5 flex-wrap pt-0.5">
+            <span className="text-[9px] font-bold text-indigo-700 uppercase tracking-wider flex items-center gap-1">
+              <Target className="w-2.5 h-2.5 text-indigo-600" />
+              Captures:
+            </span>
+            <span
+              className="px-2 py-0.5 rounded-md bg-indigo-50 border border-indigo-200 text-indigo-800 font-mono text-[10px] font-bold truncate max-w-[220px] flex items-center gap-1"
+              title={`CRM Variable: ${node.targetVariable}`}
+            >
+              <Database className="w-2.5 h-2.5 text-indigo-500 shrink-0" />
+              <span>{node.targetVariableLabel || node.targetVariable}</span>
+            </span>
+          </div>
+        )}
       </div>
 
       {/* Branch Conditions Section (All Outgoing Connection Routing Happens Here) */}

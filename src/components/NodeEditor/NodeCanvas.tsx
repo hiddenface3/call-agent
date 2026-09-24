@@ -5,11 +5,15 @@ import {
   FlowTransition,
   AgentConfig,
 } from '../../shared/types';
+import { DEFAULT_CONFIG, DEFAULT_CALL_FLOW } from '../../shared/constants';
 import { NodeCard } from './NodeCard';
 import { NodeEditModal } from './NodeEditModal';
 import { FlowTestSimulator } from './FlowTestSimulator';
-import { DEFAULT_CALL_FLOW, DEFAULT_CONFIG } from '../../shared/constants';
-import { compileFlowToSystemPrompt } from '../../services/promptCompiler';
+import {
+  compileFlowToSystemPrompt,
+  compileFlowWithSelectedModel,
+  COMPILER_MODELS,
+} from '../../services/promptCompiler';
 import {
   Plus,
   RotateCcw,
@@ -50,6 +54,7 @@ export const NodeCanvas: React.FC<NodeCanvasProps> = ({
   const [dragOffset, setDragOffset] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
   const [savedBadge, setSavedBadge] = useState<boolean>(false);
   const [promptCreatedBadge, setPromptCreatedBadge] = useState<boolean>(false);
+  const [isCompilingGroq, setIsCompilingGroq] = useState<boolean>(false);
   const [hoveredWireId, setHoveredWireId] = useState<string | null>(null);
 
   // Workflow Live Voice Call State
@@ -300,21 +305,50 @@ export const NodeCanvas: React.FC<NodeCanvasProps> = ({
     setTimeout(() => setSavedBadge(false), 2000);
   };
 
-  // Create System Prompt from All Nodes
-  const handleCreateSystemPromptFromNodes = () => {
-    const compiledPrompt = compileFlowToSystemPrompt(flow);
-    const updatedConfig: AgentConfig = {
-      ...config,
-      systemPrompt: compiledPrompt,
-    };
+  // Create System Prompt from All Nodes using Selected AI Model
+  const handleCreateSystemPromptFromNodes = async () => {
+    setIsCompilingGroq(true);
 
-    localStorage.setItem('apex_voice_config_v4', JSON.stringify(updatedConfig));
-    if (onUpdateConfig) {
-      onUpdateConfig(updatedConfig);
+    let activeFlow = flow;
+    try {
+      const saved = localStorage.getItem('apex_call_flow_graph');
+      if (saved) {
+        activeFlow = JSON.parse(saved);
+      }
+    } catch {
+      // fallback to prop
     }
 
-    setPromptCreatedBadge(true);
-    setTimeout(() => setPromptCreatedBadge(false), 2800);
+    try {
+      const selectedModel = config.compilerModel || 'openai/gpt-oss-120b';
+      const compiledPrompt = await compileFlowWithSelectedModel(activeFlow, selectedModel, config);
+
+      const updatedConfig: AgentConfig = {
+        ...config,
+        systemPrompt: compiledPrompt,
+      };
+
+      localStorage.setItem('apex_voice_config_v4', JSON.stringify(updatedConfig));
+      if (onUpdateConfig) {
+        onUpdateConfig(updatedConfig);
+      }
+
+      setPromptCreatedBadge(true);
+      setTimeout(() => setPromptCreatedBadge(false), 3500);
+    } catch (err: any) {
+      console.warn('AI compile failed, falling back to deterministic compiler:', err);
+      const fallback = compileFlowToSystemPrompt(activeFlow);
+      const updatedConfig: AgentConfig = {
+        ...config,
+        systemPrompt: fallback,
+      };
+      localStorage.setItem('apex_voice_config_v4', JSON.stringify(updatedConfig));
+      if (onUpdateConfig) onUpdateConfig(updatedConfig);
+      setPromptCreatedBadge(true);
+      setTimeout(() => setPromptCreatedBadge(false), 3500);
+    } finally {
+      setIsCompilingGroq(false);
+    }
   };
 
   // Highlight Traversed Wire when a branch condition is matched
@@ -362,19 +396,49 @@ export const NodeCanvas: React.FC<NodeCanvasProps> = ({
             <span>{isTestDrawerOpen ? 'Close Voice Call' : 'Start Live Voice Call'}</span>
           </button>
 
-          {/* Create System Prompt from All Nodes Button */}
-          <button
-            onClick={handleCreateSystemPromptFromNodes}
-            className={`flex items-center gap-1.5 px-3.5 py-2 rounded-xl font-bold text-xs transition active:scale-95 shadow-sm border ${
-              promptCreatedBadge
-                ? 'bg-purple-600 text-white border-purple-600 shadow-purple-600/30 ring-2 ring-purple-400'
-                : 'bg-purple-50 hover:bg-purple-100 text-purple-700 border-purple-200'
-            }`}
-            title="Analyze all workflow nodes and generate a complete master system prompt"
-          >
-            <Wand2 className={`w-3.5 h-3.5 ${promptCreatedBadge ? 'text-white' : 'text-purple-600'}`} />
-            <span>{promptCreatedBadge ? 'System Prompt Created!' : 'Create System Prompt from All Nodes'}</span>
-          </button>
+          {/* AI Model Selector & Prompt Compiler Group */}
+          <div className="flex items-center gap-1 bg-purple-50/90 border border-purple-200/90 rounded-xl p-0.5 shadow-sm">
+            <select
+              value={config.compilerModel || 'openai/gpt-oss-120b'}
+              onChange={(e) => {
+                const newModel = e.target.value;
+                const updated = { ...config, compilerModel: newModel };
+                localStorage.setItem('apex_voice_config_v4', JSON.stringify(updated));
+                if (onUpdateConfig) onUpdateConfig(updated);
+              }}
+              disabled={isCompilingGroq}
+              className="bg-transparent text-purple-900 font-bold text-xs py-1.5 px-2 focus:outline-none cursor-pointer border-r border-purple-200"
+              title="Select AI Model to analyze workflow nodes and compile master system prompt"
+            >
+              {COMPILER_MODELS.map((m) => (
+                <option key={m.id} value={m.id}>
+                  {m.name}
+                </option>
+              ))}
+            </select>
+
+            <button
+              onClick={handleCreateSystemPromptFromNodes}
+              disabled={isCompilingGroq}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg font-bold text-xs transition active:scale-95 shadow-sm ${
+                isCompilingGroq
+                  ? 'bg-purple-200 text-purple-900 animate-pulse cursor-wait'
+                  : promptCreatedBadge
+                  ? 'bg-purple-600 text-white shadow-purple-600/30 ring-2 ring-purple-400'
+                  : 'bg-purple-600 hover:bg-purple-700 text-white'
+              }`}
+              title="Analyze all workflow nodes and generate a master system prompt with selected model"
+            >
+              <Wand2 className={`w-3.5 h-3.5 ${isCompilingGroq ? 'animate-spin' : ''}`} />
+              <span>
+                {isCompilingGroq
+                  ? 'Compiling...'
+                  : promptCreatedBadge
+                  ? '✓ Prompt Compiled!'
+                  : 'Compile Prompt'}
+              </span>
+            </button>
+          </div>
 
           <button
             onClick={() => handleAddNode('question')}
@@ -669,6 +733,7 @@ export const NodeCanvas: React.FC<NodeCanvasProps> = ({
         onHighlightEdge={handleHighlightEdge}
         onClose={() => setIsTestDrawerOpen(false)}
         config={config}
+        onUpdateConfig={onUpdateConfig}
       />
     </div>
   );

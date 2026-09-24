@@ -1,22 +1,40 @@
 import { CallFlowGraph, FlowNode, AgentConfig, QualifiedLead } from './types';
 
 export const DEFAULT_CONFIG: AgentConfig = {
-  provider: 'groq',
+  provider: 'gemini_live',
   endpoint: 'https://api.groq.com/openai/v1',
-  model: 'openai/gpt-oss-20b',
+  model: 'gemini-3.1-flash-live-preview',
   groqApiKey: (import.meta as any).env?.VITE_GROQ_API_KEY || '',
+  geminiApiKey: (import.meta as any).env?.VITE_GEMINI_API_KEY || '',
+  geminiLiveVoice: 'Aoede',
+  thinkingLevel: 'low',
   temperature: 0.5,
   systemPrompt: `You are Sarah, a professional and friendly phone acquisition specialist.
 You speak naturally, warmly, and concisely in 1-2 conversational phone sentences.
 Always follow the exact script, identity, and company name provided in the active flow step.
 Never use bullet points, markdown formatting, or asterisks.`,
+  compilerModel: 'openai/gpt-oss-120b',
   sttEngine: 'web_speech',
   ttsEngine: 'web_speech_synth',
   selectedVoiceName: 'Google US English',
   silenceDetectionMs: 1400,
   autoSpeak: true,
   useNodeFlow: true,
+  telnyxApiKey: (import.meta as any).env?.VITE_TELNYX_API_KEY || '',
+  telnyxConnectionId: (import.meta as any).env?.VITE_TELNYX_CONNECTION_ID || '',
+  telnyxFromNumber: (import.meta as any).env?.VITE_TELNYX_FROM_NUMBER || '',
+  telnyxRelayUrl: (import.meta as any).env?.VITE_TELNYX_RELAY_URL || 'http://localhost:3001',
+  telnyxAmdStrategy: 'voicemail_drop',
+  telnyxVoicemailScript: `Hi, this is Sarah from Property Care regarding your property. We are preparing cash offers in your neighborhood this week. Please give me a call back at {{from_number}} when you get this. Thanks!`,
 };
+
+export const GEMINI_LIVE_VOICES = [
+  { id: 'Aoede', name: 'Aoede (Warm, Engaging & Expressive - Female)' },
+  { id: 'Puck', name: 'Puck (Playful, Natural & Energetic - Male/Youth)' },
+  { id: 'Charon', name: 'Charon (Deep, Calm & Authoritative - Male)' },
+  { id: 'Fenrir', name: 'Fenrir (Direct, Clear & Confident - Male)' },
+  { id: 'Kore', name: 'Kore (Gentle, Professional & Friendly - Female)' },
+] as const;
 
 export const INITIAL_LEAD_STATE: QualifiedLead = {
   sellerName: '',
@@ -74,7 +92,9 @@ export const DEFAULT_CALL_FLOW: CallFlowGraph = {
       id: 'node-greeting',
       type: 'start',
       title: '1. Greeting & Selling Intent',
-      agentPrompt: 'Hi, this is Sarah from Property Care. Are you open to considering selling your property for the best price? {{client_name}}',
+      agentPrompt: 'Hi, this is Sarah from Property Care. Are you open to considering selling your property for the best price?',
+      targetVariable: 'client_name',
+      targetVariableLabel: 'Client Name',
       position: { x: 50, y: 220 },
       transitions: [
         {
@@ -95,7 +115,9 @@ export const DEFAULT_CALL_FLOW: CallFlowGraph = {
       id: 'node-bed-bath',
       type: 'question',
       title: '2. Bedrooms & Bathrooms Specs',
-      agentPrompt: 'Great! How many bedrooms and bathrooms does the property have, and does it need any major repairs or updates? {{property_details}} {{condition}}',
+      agentPrompt: 'Great! How many bedrooms and bathrooms does the property have, and does it need any major repairs or updates?',
+      targetVariable: 'property_details',
+      targetVariableLabel: 'Property Details & Condition',
       position: { x: 450, y: 100 },
       transitions: [
         {
@@ -111,6 +133,8 @@ export const DEFAULT_CALL_FLOW: CallFlowGraph = {
       type: 'objection',
       title: '3. Objection: Future Selling Interest',
       agentPrompt: 'Completely understand! If you are not looking to sell right now, might you consider selling down the road in the next 6 to 12 months?',
+      targetVariable: 'timeline',
+      targetVariableLabel: 'Selling Timeline',
       position: { x: 450, y: 440 },
       transitions: [
         {
@@ -131,7 +155,9 @@ export const DEFAULT_CALL_FLOW: CallFlowGraph = {
       id: 'node-pricing-timeline',
       type: 'question',
       title: '4. Asking Price & Timeline',
-      agentPrompt: 'Got it! What ballpark cash price do you have in mind, and how quickly would you ideally like to close the sale? {{asking_price}} {{timeline}}',
+      agentPrompt: 'Got it! What ballpark cash price do you have in mind, and how quickly would you ideally like to close the sale?',
+      targetVariable: 'asking_price',
+      targetVariableLabel: 'Asking Price',
       position: { x: 860, y: 100 },
       transitions: [
         {
@@ -146,7 +172,9 @@ export const DEFAULT_CALL_FLOW: CallFlowGraph = {
       id: 'node-nurture-text',
       type: 'action',
       title: '5. Future Nurture & Valuation',
-      agentPrompt: 'Would it be okay if we send you a free, no-obligation cash estimate via text so you have it for future reference? {{property_address}}',
+      agentPrompt: 'Would it be okay if we send you a free, no-obligation cash estimate via text so you have it for future reference?',
+      targetVariable: 'property_address',
+      targetVariableLabel: 'Property Address',
       position: { x: 860, y: 440 },
       transitions: [
         {
@@ -161,7 +189,9 @@ export const DEFAULT_CALL_FLOW: CallFlowGraph = {
       id: 'node-senior-buyer',
       type: 'action',
       title: '6. Senior Buyer Callback',
-      agentPrompt: 'Thank you for all those details! Would tomorrow afternoon work for a quick 10-minute follow-up call with our senior acquisition manager to present a firm cash offer? {{callback_time}}',
+      agentPrompt: 'Thank you for all those details! Would tomorrow afternoon work for a quick 10-minute follow-up call with our senior acquisition manager to present a firm cash offer?',
+      targetVariable: 'callback_time',
+      targetVariableLabel: 'Scheduled Callback Time',
       position: { x: 1260, y: 100 },
       transitions: [
         {

@@ -1,5 +1,18 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { X, Plus, Trash2, Save, Sparkles, GitBranch, ArrowRight, Tag, Check, SlidersHorizontal } from 'lucide-react';
+import {
+  X,
+  Plus,
+  Trash2,
+  Save,
+  Sparkles,
+  GitBranch,
+  ArrowRight,
+  Tag,
+  Target,
+  Database,
+  SlidersHorizontal,
+  CheckCircle2,
+} from 'lucide-react';
 import { FlowNode, FlowTransition } from '../../shared/types';
 
 interface NodeEditModalProps {
@@ -19,6 +32,18 @@ const DEFAULT_CUSTOM_VARIABLES = [
   'roof_age',
 ];
 
+const STANDARD_VARIABLES: { key: string; label: string; description: string }[] = [
+  { key: '', label: '-- None (No variable to capture on this step) --', description: 'Agent speaks without capturing a CRM slot' },
+  { key: 'asking_price', label: 'Asking Price (asking_price)', description: 'Captures homeowner price expectation or refusal' },
+  { key: 'callback_time', label: 'Scheduled Callback Time (callback_time)', description: 'Captures agreed follow-up appointment time' },
+  { key: 'property_details', label: 'Property Details & Bed/Bath (property_details)', description: 'Captures bed, bath, and property specs' },
+  { key: 'client_name', label: 'Client / Seller Name (client_name)', description: 'Captures the caller or homeowner name' },
+  { key: 'property_address', label: 'Property Address (property_address)', description: 'Captures property street address or location' },
+  { key: 'condition', label: 'Condition & Repairs (condition)', description: 'Captures repair status, updates, or fixer info' },
+  { key: 'timeline', label: 'Selling Timeline (timeline)', description: 'Captures urgency or closing timeframe' },
+  { key: 'reason_for_selling', label: 'Reason for Selling / Motivation (reason_for_selling)', description: 'Captures reason for sale' },
+];
+
 export const NodeEditModal: React.FC<NodeEditModalProps> = ({
   isOpen,
   node,
@@ -26,7 +51,7 @@ export const NodeEditModal: React.FC<NodeEditModalProps> = ({
   onClose,
   onSave,
 }) => {
-  const [form, setForm] = useState<FlowNode | null>(node);
+  const [form, setForm] = useState<FlowNode | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
 
   // Custom Variable State
@@ -43,7 +68,17 @@ export const NodeEditModal: React.FC<NodeEditModalProps> = ({
   const [isCreatingVar, setIsCreatingVar] = useState<boolean>(false);
 
   useEffect(() => {
-    setForm(node ? JSON.parse(JSON.stringify(node)) : null);
+    if (node) {
+      const cloned: FlowNode = JSON.parse(JSON.stringify(node));
+      // Auto-sanitize existing agentPrompt if it contains residual {{...}} tags
+      cloned.agentPrompt = (cloned.agentPrompt || '')
+        .replace(/\{\{[^}]*\}\}/g, '')
+        .replace(/\s{2,}/g, ' ')
+        .trim();
+      setForm(cloned);
+    } else {
+      setForm(null);
+    }
   }, [node]);
 
   const saveCustomVarsToStorage = (vars: string[]) => {
@@ -58,38 +93,32 @@ export const NodeEditModal: React.FC<NodeEditModalProps> = ({
   if (!isOpen || !form) return null;
 
   /**
-   * Insert variable tag at cursor position inside prompt textarea
+   * Set the target capture variable for this node
    */
-  const handleInsertTag = (tagText: string) => {
-    const currentPrompt = form.agentPrompt || '';
-    const textarea = textareaRef.current;
-
-    if (textarea && typeof textarea.selectionStart === 'number') {
-      const start = textarea.selectionStart;
-      const end = textarea.selectionEnd;
-      const before = currentPrompt.substring(0, start);
-      const after = currentPrompt.substring(end);
-      
-      const insertStr = (before.endsWith(' ') || before.length === 0 ? '' : ' ') +
-        tagText +
-        (after.startsWith(' ') || after.length === 0 ? '' : ' ');
-
-      const updatedText = before + insertStr + after;
-      setForm({ ...form, agentPrompt: updatedText });
-
-      setTimeout(() => {
-        textarea.focus();
-        const nextPos = start + insertStr.length;
-        textarea.setSelectionRange(nextPos, nextPos);
-      }, 50);
-    } else {
-      const updatedText = currentPrompt ? `${currentPrompt} ${tagText}` : tagText;
-      setForm({ ...form, agentPrompt: updatedText });
+  const handleSelectVariable = (variableKey: string) => {
+    if (!variableKey) {
+      setForm({
+        ...form,
+        targetVariable: undefined,
+        targetVariableLabel: undefined,
+      });
+      return;
     }
+
+    const std = STANDARD_VARIABLES.find((v) => v.key === variableKey);
+    const label = std
+      ? std.label.split(' (')[0]
+      : variableKey.replace(/_/g, ' ').replace(/\b\w/g, (l) => l.toUpperCase());
+
+    setForm({
+      ...form,
+      targetVariable: variableKey,
+      targetVariableLabel: label,
+    });
   };
 
   /**
-   * Create a new custom extraction variable
+   * Create a new custom extraction variable and attach it to this node
    */
   const handleAddCustomVariable = (customName?: string) => {
     const nameToAdd = (customName || newVarName).trim();
@@ -109,8 +138,8 @@ export const NodeEditModal: React.FC<NodeEditModalProps> = ({
       saveCustomVarsToStorage(updated);
     }
 
-    // Immediately insert tag into prompt
-    handleInsertTag(`{{${cleanedSlug}}}`);
+    // Attach to current node as its target variable
+    handleSelectVariable(cleanedSlug);
     setNewVarName('');
     setIsCreatingVar(false);
   };
@@ -122,6 +151,9 @@ export const NodeEditModal: React.FC<NodeEditModalProps> = ({
     e.stopPropagation();
     const updated = customVariables.filter((v) => v !== slug);
     saveCustomVarsToStorage(updated);
+    if (form.targetVariable === slug) {
+      setForm({ ...form, targetVariable: undefined, targetVariableLabel: undefined });
+    }
   };
 
   const handleAddTransition = () => {
@@ -154,7 +186,16 @@ export const NodeEditModal: React.FC<NodeEditModalProps> = ({
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (form) {
-      onSave(form);
+      // Ensure agentPrompt is 100% clean of any {{...}} brackets
+      const cleanPrompt = (form.agentPrompt || '')
+        .replace(/\{\{[^}]*\}\}/g, '')
+        .replace(/\s{2,}/g, ' ')
+        .trim();
+
+      onSave({
+        ...form,
+        agentPrompt: cleanPrompt,
+      });
       onClose();
     }
   };
@@ -211,198 +252,192 @@ export const NodeEditModal: React.FC<NodeEditModalProps> = ({
             </div>
           </div>
 
-          {/* Prompt Instructions with Dynamic Data Extraction Variables */}
+          {/* Section 1: Agent Spoken Speech Instructions */}
           <div className="space-y-2">
             <div className="flex items-center justify-between">
               <label className="text-slate-800 block font-bold flex items-center gap-1.5">
                 <Sparkles className="w-3.5 h-3.5 text-blue-600" />
                 Agent Speech Instructions for this Step
               </label>
-              <span className="text-[10px] text-indigo-600 font-semibold bg-indigo-50 px-2.5 py-0.5 rounded-full border border-indigo-100 flex items-center gap-1">
-                <Tag className="w-3 h-3 text-indigo-500" />
-                <span>AI Data Extraction Enabled</span>
+              <span className="text-[10px] text-emerald-700 font-semibold bg-emerald-50 px-2.5 py-0.5 rounded-full border border-emerald-200 flex items-center gap-1">
+                <CheckCircle2 className="w-3 h-3 text-emerald-600" />
+                <span>Pure Spoken Speech</span>
               </span>
             </div>
 
             <p className="text-[11px] text-slate-500">
-              What Sarah should say or ask. Click any variable below to insert it at cursor position—answers will be automatically extracted into your CRM table & downloadable CSV!
+              Type exactly what the AI agent should speak aloud. Write natural conversational sentences only (strictly no curly braces, variables, or brackets).
             </p>
 
-            {/* Variable Tag Toolbar & Custom Variable Creator */}
-            <div className="p-3 bg-gradient-to-r from-blue-50/90 via-indigo-50/60 to-purple-50/80 rounded-2xl border border-blue-100/90 space-y-2.5 shadow-2xs">
-              <div className="flex items-center justify-between">
-                <span className="text-[10px] font-bold text-slate-700 uppercase tracking-wider flex items-center gap-1">
-                  <span>Standard Extraction Variables:</span>
-                </span>
-                <button
-                  type="button"
-                  onClick={() => setIsCreatingVar(!isCreatingVar)}
-                  className="text-[11px] font-bold text-indigo-600 hover:text-indigo-700 bg-white/90 hover:bg-white px-2 py-0.5 rounded-lg border border-indigo-200 transition shadow-2xs flex items-center gap-1 active:scale-95"
-                >
-                  <Plus className="w-3 h-3 text-indigo-600" />
-                  <span>{isCreatingVar ? 'Hide Custom Creator' : '+ Add Custom Variable'}</span>
-                </button>
-              </div>
+            <textarea
+              ref={textareaRef}
+              rows={3}
+              value={form.agentPrompt}
+              onChange={(e) => setForm({ ...form, agentPrompt: e.target.value })}
+              className="w-full bg-slate-50 border border-slate-200 rounded-xl p-3 text-slate-800 text-xs focus:border-blue-600 focus:bg-white focus:outline-none transition leading-relaxed font-sans"
+              placeholder="e.g. Great! What ballpark cash price do you have in mind for the property?"
+              required
+            />
+          </div>
 
-              {/* Standard Built-in Variable Chips */}
-              <div className="flex flex-wrap gap-1.5">
-                {[
-                  { tag: '{{client_name}}', label: 'Client Name', color: 'bg-white hover:bg-blue-100 text-blue-800 border-blue-200' },
-                  { tag: '{{property_details}}', label: 'Property Details (Bed/Bath)', color: 'bg-white hover:bg-emerald-100 text-emerald-800 border-emerald-200' },
-                  { tag: '{{property_address}}', label: 'Property Address', color: 'bg-white hover:bg-purple-100 text-purple-800 border-purple-200' },
-                  { tag: '{{asking_price}}', label: 'Asking Price', color: 'bg-white hover:bg-amber-100 text-amber-800 border-amber-200' },
-                  { tag: '{{callback_time}}', label: 'Callback Time', color: 'bg-white hover:bg-cyan-100 text-cyan-800 border-cyan-200' },
-                  { tag: '{{condition}}', label: 'Repairs & Condition', color: 'bg-white hover:bg-rose-100 text-rose-800 border-rose-200' },
-                  { tag: '{{timeline}}', label: 'Selling Timeline', color: 'bg-white hover:bg-teal-100 text-teal-800 border-teal-200' },
-                ].map((item) => (
-                  <button
-                    key={item.tag}
-                    type="button"
-                    onClick={() => handleInsertTag(item.tag)}
-                    className={`px-2 py-1 rounded-lg border text-[10px] font-mono font-semibold transition active:scale-95 shadow-xs flex items-center gap-1 ${item.color}`}
-                    title={`Click to insert ${item.tag} at cursor`}
-                  >
-                    <Plus className="w-2.5 h-2.5" />
-                    <span>{item.tag}</span>
-                  </button>
-                ))}
-              </div>
-
-              {/* Custom Dynamic Variables List */}
-              {customVariables.length > 0 && (
-                <div className="pt-2 border-t border-indigo-100/80 space-y-1.5">
-                  <span className="text-[10px] font-bold text-indigo-800 uppercase tracking-wider block">
-                    Your Custom Dynamic Variables:
-                  </span>
-                  <div className="flex flex-wrap gap-1.5">
-                    {customVariables.map((cVar) => (
-                      <div
-                        key={cVar}
-                        className="inline-flex items-center rounded-lg border border-purple-200 bg-white hover:bg-purple-50 text-purple-800 text-[10px] font-mono font-semibold shadow-xs overflow-hidden transition group"
-                      >
-                        <button
-                          type="button"
-                          onClick={() => handleInsertTag(`{{${cVar}}}`)}
-                          className="px-2 py-1 flex items-center gap-1 hover:text-purple-900"
-                          title={`Insert {{${cVar}}} into prompt`}
-                        >
-                          <Sparkles className="w-2.5 h-2.5 text-purple-500" />
-                          <span>{`{{${cVar}}}`}</span>
-                        </button>
-                        <button
-                          type="button"
-                          onClick={(e) => handleDeleteCustomVariable(cVar, e)}
-                          className="px-1 py-1 text-slate-400 hover:text-rose-600 hover:bg-rose-50 border-l border-purple-100 transition"
-                          title={`Remove ${cVar} variable`}
-                        >
-                          <X className="w-2.5 h-2.5" />
-                        </button>
-                      </div>
-                    ))}
-                  </div>
+          {/* Section 2: Dedicated CRM Data Capture Variable (Completely Separate from Prompt) */}
+          <div className="p-3.5 bg-gradient-to-r from-blue-50/90 via-indigo-50/60 to-purple-50/80 rounded-2xl border border-indigo-100/90 space-y-3 shadow-2xs">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <div className="p-1.5 rounded-lg bg-indigo-600 text-white shadow-xs">
+                  <Database className="w-3.5 h-3.5" />
                 </div>
-              )}
-
-              {/* Interactive Custom Variable Creator Section */}
-              {isCreatingVar && (
-                <div className="p-2.5 bg-white rounded-xl border border-indigo-200 space-y-2 animate-fade-in shadow-sm">
-                  <div className="flex items-center justify-between">
-                    <span className="text-[11px] font-bold text-slate-800 flex items-center gap-1.5">
-                      <SlidersHorizontal className="w-3 h-3 text-indigo-600" />
-                      Create New Dynamic Extraction Variable
+                <div>
+                  <span className="text-xs font-bold text-slate-900 block flex items-center gap-1">
+                    <span>Data Capture Target for this Step</span>
+                    <span className="text-[10px] text-indigo-700 bg-white/90 px-1.5 py-0.5 rounded font-semibold border border-indigo-200">
+                      AI Brain Powered
                     </span>
-                    <span className="text-[10px] text-slate-500">Auto-converts to slug syntax</span>
-                  </div>
+                  </span>
+                  <span className="text-[10px] text-slate-500 block">
+                    Kept completely separate from spoken speech so the AI will NEVER utter variable names aloud.
+                  </span>
+                </div>
+              </div>
 
-                  <div className="flex items-center gap-2">
-                    <div className="flex-1 relative">
-                      <input
-                        type="text"
-                        value={newVarName}
-                        onChange={(e) => setNewVarName(e.target.value)}
-                        onKeyDown={(e) => {
-                          if (e.key === 'Enter') {
-                            e.preventDefault();
-                            handleAddCustomVariable();
-                          }
-                        }}
-                        placeholder="e.g. loan_balance, monthly_rent, preferred_time, email"
-                        className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-1.5 text-xs text-slate-900 font-mono focus:border-indigo-600 focus:bg-white focus:outline-none transition"
-                      />
+              <button
+                type="button"
+                onClick={() => setIsCreatingVar(!isCreatingVar)}
+                className="text-[11px] font-bold text-indigo-600 hover:text-indigo-700 bg-white hover:bg-slate-50 px-2.5 py-1 rounded-xl border border-indigo-200 transition shadow-2xs flex items-center gap-1 active:scale-95 shrink-0"
+              >
+                <Plus className="w-3 h-3 text-indigo-600" />
+                <span>{isCreatingVar ? 'Hide Creator' : '+ Custom Variable'}</span>
+              </button>
+            </div>
+
+            {/* Variable Selection Dropdown */}
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5">
+              <div>
+                <label className="text-[10px] font-bold text-slate-700 uppercase tracking-wider block mb-1">
+                  Select CRM Variable to Capture:
+                </label>
+                <select
+                  value={form.targetVariable || ''}
+                  onChange={(e) => handleSelectVariable(e.target.value)}
+                  className="w-full bg-white border border-indigo-200 rounded-xl px-3 py-2 text-xs font-semibold text-slate-800 focus:border-indigo-600 focus:outline-none transition shadow-2xs"
+                >
+                  <optgroup label="Standard CRM Variables">
+                    {STANDARD_VARIABLES.map((v) => (
+                      <option key={v.key} value={v.key}>
+                        {v.label}
+                      </option>
+                    ))}
+                  </optgroup>
+                  {customVariables.length > 0 && (
+                    <optgroup label="Your Custom Dynamic Variables">
+                      {customVariables.map((cVar) => (
+                        <option key={cVar} value={cVar}>
+                          {cVar} (Custom)
+                        </option>
+                      ))}
+                    </optgroup>
+                  )}
+                </select>
+              </div>
+
+              {/* Active Variable Display Card */}
+              <div className="flex flex-col justify-center">
+                <label className="text-[10px] font-bold text-slate-700 uppercase tracking-wider block mb-1">
+                  Active Extraction Target:
+                </label>
+                {form.targetVariable ? (
+                  <div className="px-3 py-2 bg-white rounded-xl border border-indigo-200 flex items-center justify-between shadow-2xs">
+                    <div className="flex items-center gap-2">
+                      <Target className="w-4 h-4 text-indigo-600 shrink-0" />
+                      <div>
+                        <span className="text-xs font-bold text-indigo-900 block leading-none">
+                          {form.targetVariableLabel || form.targetVariable}
+                        </span>
+                        <span className="text-[10px] font-mono text-indigo-500 block mt-0.5">
+                          Key: {form.targetVariable}
+                        </span>
+                      </div>
                     </div>
                     <button
                       type="button"
-                      onClick={() => handleAddCustomVariable()}
-                      disabled={!newVarName.trim()}
-                      className="px-3 py-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 text-white font-bold text-xs shadow-xs transition active:scale-95 flex items-center gap-1"
+                      onClick={() => handleSelectVariable('')}
+                      className="text-[10px] text-slate-400 hover:text-rose-600 font-semibold px-2 py-0.5 rounded-lg hover:bg-rose-50 transition"
+                      title="Clear variable"
                     >
-                      <Plus className="w-3.5 h-3.5" />
-                      <span>Add & Insert</span>
+                      Remove
                     </button>
                   </div>
-
-                  {/* Quick Suggestions */}
-                  <div className="flex items-center gap-1.5 flex-wrap pt-1">
-                    <span className="text-[9px] text-slate-400 font-medium">Quick suggestions:</span>
-                    {[
-                      'mortgage_balance',
-                      'monthly_rent',
-                      'email_address',
-                      'preferred_time',
-                      'roof_age',
-                      'square_footage',
-                      'occupancy',
-                      'decision_maker',
-                    ].map((sug) => (
-                      <button
-                        key={sug}
-                        type="button"
-                        onClick={() => handleAddCustomVariable(sug)}
-                        className="text-[9px] font-mono text-indigo-600 hover:text-indigo-800 bg-indigo-50 hover:bg-indigo-100 px-1.5 py-0.5 rounded border border-indigo-100 transition"
-                      >
-                        + {sug}
-                      </button>
-                    ))}
+                ) : (
+                  <div className="px-3 py-2 bg-slate-100/70 rounded-xl border border-dashed border-slate-200 text-[11px] text-slate-500 italic">
+                    No variable attached (Speech only)
                   </div>
-                </div>
-              )}
+                )}
+              </div>
             </div>
 
-            {/* Prompt Text Area */}
-            <textarea
-              ref={textareaRef}
-              rows={4}
-              value={form.agentPrompt}
-              onChange={(e) => setForm({ ...form, agentPrompt: e.target.value })}
-              className="w-full bg-slate-50 border border-slate-200 rounded-xl p-3 text-slate-800 text-xs focus:border-blue-600 focus:bg-white focus:outline-none transition leading-relaxed"
-              placeholder="e.g. Great! How many bedrooms and bathrooms does the property have? {{property_details}}"
-              required
-            />
-
-            {/* Live Detected Slots Indicator */}
-            {(() => {
-              const detected = [...form.agentPrompt.matchAll(/\{\{([a-zA-Z0-9_\s-]+)\}\}/g)].map((m) => m[1].trim());
-              if (detected.length === 0) return null;
-              return (
-                <div className="flex items-center gap-2 text-[11px] text-slate-600 p-2.5 bg-emerald-50 rounded-xl border border-emerald-200">
-                  <span className="font-bold text-emerald-800 flex items-center gap-1 shrink-0">
-                    <Sparkles className="w-3.5 h-3.5 text-emerald-600" />
-                    Detected Extraction Slots in this Step:
+            {/* Custom Variable Creator */}
+            {isCreatingVar && (
+              <div className="p-2.5 bg-white rounded-xl border border-indigo-200 space-y-2 animate-fade-in shadow-xs">
+                <div className="flex items-center justify-between">
+                  <span className="text-[11px] font-bold text-slate-800 flex items-center gap-1.5">
+                    <SlidersHorizontal className="w-3 h-3 text-indigo-600" />
+                    Create New Dynamic Extraction Variable
                   </span>
-                  <div className="flex flex-wrap gap-1.5">
-                    {detected.map((slot, sIdx) => (
-                      <span
-                        key={sIdx}
-                        className="px-2 py-0.5 rounded-md bg-emerald-600 text-white font-mono text-[10px] font-semibold flex items-center gap-1 shadow-2xs"
-                      >
-                        <Tag className="w-2.5 h-2.5" />
-                        {`{{${slot}}}`}
-                      </span>
-                    ))}
-                  </div>
+                  <span className="text-[10px] text-slate-500">Auto-converts to slug syntax</span>
                 </div>
-              );
-            })()}
+
+                <div className="flex items-center gap-2">
+                  <div className="flex-1">
+                    <input
+                      type="text"
+                      value={newVarName}
+                      onChange={(e) => setNewVarName(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') {
+                          e.preventDefault();
+                          handleAddCustomVariable();
+                        }
+                      }}
+                      placeholder="e.g. loan_balance, monthly_rent, roof_age, tenant_status"
+                      className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-1.5 text-xs text-slate-900 font-mono focus:border-indigo-600 focus:bg-white focus:outline-none transition"
+                    />
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => handleAddCustomVariable()}
+                    disabled={!newVarName.trim()}
+                    className="px-3 py-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 text-white font-bold text-xs shadow-xs transition active:scale-95 flex items-center gap-1 shrink-0"
+                  >
+                    <Plus className="w-3.5 h-3.5" />
+                    <span>Create & Connect</span>
+                  </button>
+                </div>
+
+                {/* Quick Suggestions */}
+                <div className="flex items-center gap-1.5 flex-wrap pt-1">
+                  <span className="text-[9px] text-slate-400 font-medium">Quick suggestions:</span>
+                  {[
+                    'mortgage_balance',
+                    'monthly_rent',
+                    'email_address',
+                    'preferred_time',
+                    'roof_age',
+                    'square_footage',
+                    'occupancy',
+                    'decision_maker',
+                  ].map((sug) => (
+                    <button
+                      key={sug}
+                      type="button"
+                      onClick={() => handleAddCustomVariable(sug)}
+                      className="text-[9px] font-mono text-indigo-600 hover:text-indigo-800 bg-indigo-50 hover:bg-indigo-100 px-1.5 py-0.5 rounded border border-indigo-100 transition"
+                    >
+                      + {sug}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
 
           {/* Outgoing Branch Transitions */}

@@ -21,14 +21,15 @@ export const Navbar: React.FC<NavbarProps> = ({
   onOpenSettings,
   onClearSession,
 }) => {
+  const agentNameMatch = activeNode?.agentPrompt?.match(/(?:this is|I'm|I am|my name is)\s+([A-Za-z]+)/i);
+  const displayPersona = agentNameMatch ? (agentNameMatch[1].charAt(0).toUpperCase() + agentNameMatch[1].slice(1).toLowerCase()) : 'Sarah';
+
   return (
-    <header className="h-16 border-b border-slate-800/80 bg-slate-950/60 backdrop-blur-xl px-6 flex items-center justify-between z-20 shrink-0">
-      {/* Brand & Mode */}
+    <header className="h-16 px-6 bg-slate-950/80 backdrop-blur-md border-b border-slate-800 flex items-center justify-between shrink-0 z-10">
+      {/* Brand / Title */}
       <div className="flex items-center gap-3">
-        <div className="w-10 h-10 rounded-xl bg-gradient-to-tr from-blue-600 via-indigo-600 to-cyan-400 p-[1px] shadow-lg shadow-blue-500/20">
-          <div className="w-full h-full bg-slate-950 rounded-[11px] flex items-center justify-center">
-            <Bot className="w-5 h-5 text-blue-400 animate-pulse-slow" />
-          </div>
+        <div className="w-9 h-9 rounded-xl bg-gradient-to-tr from-blue-600 to-indigo-600 flex items-center justify-center shadow-lg shadow-blue-500/20">
+          <Bot className="w-5 h-5 text-white" />
         </div>
         <div>
           <div className="flex items-center gap-2">
@@ -42,7 +43,7 @@ export const Navbar: React.FC<NavbarProps> = ({
           <p className="text-xs text-slate-400 flex items-center gap-1">
             <span>Real Estate Lead Qualification</span>
             <span className="w-1 h-1 rounded-full bg-slate-600"></span>
-            <span className="text-slate-300">Persona: Sarah</span>
+            <span className="text-slate-300">Persona: {displayPersona}</span>
           </p>
         </div>
       </div>
@@ -89,11 +90,16 @@ export const Navbar: React.FC<NavbarProps> = ({
           </div>
         )}
 
-        {/* LLM Engine Status */}
+        {/* LLM / Voice Engine Status */}
         <div className="flex items-center gap-2 text-xs pr-3 border-r border-slate-800">
-          <CloudLightning className="w-3.5 h-3.5 text-amber-400" />
-          <span className="text-slate-400">LLM:</span>
-          {isLlmConnected ? (
+          <CloudLightning className="w-3.5 h-3.5 text-cyan-400" />
+          <span className="text-slate-400">Engine:</span>
+          {config.provider === 'gemini_live' ? (
+            <span className="flex items-center gap-1 text-cyan-400 font-medium font-mono text-[11px]">
+              <span className="w-2 h-2 rounded-full bg-cyan-400 animate-pulse"></span>
+              Gemini Live ({config.geminiLiveVoice || 'Aoede'})
+            </span>
+          ) : isLlmConnected ? (
             <span className="flex items-center gap-1 text-emerald-400 font-medium font-mono text-[11px]">
               <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
               {config.provider === 'groq' ? `Groq: ${config.model}` : config.model}
@@ -110,14 +116,18 @@ export const Navbar: React.FC<NavbarProps> = ({
         <div className="flex items-center gap-2 text-xs pr-3 border-r border-slate-800">
           <Mic className="w-3.5 h-3.5 text-blue-400" />
           <span className="text-slate-400">STT:</span>
-          <span className="text-slate-200 font-medium text-[11px]">VAD</span>
+          <span className="text-slate-200 font-medium text-[11px]">
+            {config.provider === 'gemini_live' ? 'Native 16kHz' : 'Web Speech'}
+          </span>
         </div>
 
         {/* Voice Synth */}
         <div className="flex items-center gap-2 text-xs">
           <Volume2 className="w-3.5 h-3.5 text-cyan-400" />
           <span className="text-slate-400">TTS:</span>
-          <span className="text-slate-200 font-medium text-[11px]">Neural Voice</span>
+          <span className="text-slate-200 font-medium text-[11px]">
+            {config.provider === 'gemini_live' ? 'Gemini 24kHz Audio' : 'Neural Voice'}
+          </span>
         </div>
       </div>
 

@@ -287,6 +287,13 @@ export class SpeechService {
       return;
     }
 
+    // Never speak through browser SpeechSynthesis if Gemini Live native voice model is active
+    if (config.provider === 'gemini_live') {
+      console.warn('[SpeechService.speak] Bypassed browser SpeechSynthesis because Gemini Live native audio is active.');
+      if (onEnd) onEnd();
+      return;
+    }
+
     // Stop any ongoing speech first
     this.stopSpeaking();
 

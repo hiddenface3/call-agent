@@ -41,7 +41,10 @@ export interface FlowNode {
   id: string;
   type: 'start' | 'question' | 'objection' | 'action' | 'end';
   title: string;
-  agentPrompt: string; // What the AI agent should say or ask
+  agentPrompt: string; // Pure spoken speech (strictly NO curly braces or variable names)
+  targetVariable?: string; // Dedicated data extraction variable key (e.g. 'asking_price', 'callback_time')
+  targetVariableLabel?: string; // User-friendly label (e.g. 'Asking Price', 'Scheduled Callback Time')
+  customVariables?: string[]; // Node-specific custom extraction variables
   position: { x: number; y: number };
   defaultNextNodeId?: string; // Direct link without adding branch conditions
   transitions: FlowTransition[];
@@ -55,12 +58,16 @@ export interface CallFlowGraph {
 }
 
 export interface AgentConfig {
-  provider: 'groq' | 'ollama' | 'lmstudio' | 'local_custom' | 'browser_agent';
+  provider: 'gemini_live' | 'groq' | 'ollama' | 'lmstudio' | 'local_custom' | 'browser_agent';
   endpoint: string;
   model: string;
   groqApiKey: string;
+  geminiApiKey?: string;
+  geminiLiveVoice?: 'Aoede' | 'Puck' | 'Charon' | 'Fenrir' | 'Kore';
+  thinkingLevel?: 'minimal' | 'low' | 'medium' | 'high';
   temperature: number;
   systemPrompt: string;
+  compilerModel?: string;
   sttEngine: 'web_speech' | 'cloud_whisper' | 'local_whisper';
   ttsEngine: 'web_speech_synth' | 'elevenlabs' | 'kokoro_local';
   elevenLabsApiKey?: string;
@@ -69,4 +76,32 @@ export interface AgentConfig {
   autoSpeak: boolean;
   silenceDetectionMs: number;
   useNodeFlow: boolean;
+  // Telnyx Real Telephony Config
+  telnyxApiKey?: string;
+  telnyxConnectionId?: string;
+  telnyxFromNumber?: string;
+  telnyxRelayUrl?: string;
+  telnyxAmdStrategy?: 'hangup_on_machine' | 'voicemail_drop' | 'wait_for_human';
+  telnyxVoicemailScript?: string;
 }
+
+export type CallMode = 'local_test' | 'telnyx_outbound';
+
+export type TelephonyCallStatus =
+  | 'idle'
+  | 'initiating'
+  | 'ringing'
+  | 'amd_evaluating'
+  | 'connected_live'
+  | 'voicemail_drop'
+  | 'completed'
+  | 'failed';
+
+export interface PhoneContact {
+  id: string;
+  name: string;
+  phone: string;
+  address?: string;
+  notes?: string;
+}
+

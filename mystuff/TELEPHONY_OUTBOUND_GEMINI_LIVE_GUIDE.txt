@@ -1,0 +1,374 @@
+====================================================================================================
+               APEX VOICE AI — REAL TELEPHONY OUTBOUND CALLING ARCHITECTURE
+           INTEGRATING TELNYX CALL CONTROL V2 WITH GEMINI LIVE & TELNYX AMD
+====================================================================================================
+
++--------------------------------------------------------------------------------------------------+
+|                                    1. EXECUTIVE ARCHITECTURAL SUMMARY                           |
++--------------------------------------------------------------------------------------------------+
+
+Current State:
+  - Apex Voice AI runs entirely in-browser over Web Audio API (Microphone 16kHz PCM -> Gemini Live
+    WebSocket -> 24kHz PCM -> Browser Speakers).
+
+Target State:
+  - Real telephony outbound calling: Dial homeowner mobile/landline numbers over the public switched
+    telephone network (PSTN) using Telnyx Call Control v2 API and private Tier 1 IP telecommunications network.
+  - Power the phone call with Google Gemini Live (gemini-3.1-flash-live-preview / gemini-2.5-flash)
+    for native, zero-lag, speech-to-speech intelligence.
+  - Automatically detect and handle Answering Machines / Voicemail using Telnyx Premium AMD & Beep Detection
+    to eliminate wasted agent minutes and execute automated voicemail drops.
+  - Why Telnyx over Twilio:
+    * Cost efficiency: ~50-60% lower calling costs (~$0.007/min vs Twilio ~$0.014+/min).
+    * Telnyx owns a private global fiber backbone: lower audio jitter, fewer dropped WebSocket packets.
+    * Superior AMD: Native ML-based Premium AMD + dedicated `call.machine.beep.detected` webhook.
+    * Modern Event-Driven Call Control v2 API: granular command control (no mandatory static XML required).
+
+
++--------------------------------------------------------------------------------------------------+
+|                                    2. HIGH-LEVEL SYSTEM MIND MAP                                |
++--------------------------------------------------------------------------------------------------+
+
+                                  [ APEX REACT UI (CANVAS / DASHBOARD) ]
+                                                    |
+                                    (1) Click "Call Homeowner"
+                                    (Target: +1-555-382-9104)
+                                                    v
+                                  +------------------------------------+
+                                  |   TELEPHONY RELAY BACKEND SERVER   |
+                                  |     (Node.js / Python FastAPI)     |
+                                  +------------------------------------+
+                                            /                  \
+                       (2) REST: Initiate Call                  \ (5) Open Bi-directional
+                           (Telnyx Call Control v2)              \    Gemini Live Session
+                                           v                      \   (Google Live API v1beta)
+                           +-----------------------+               v
+                           |      TELNYX CLOUD     |       +-------------------------------+
+                           |  (Call Control Engine)|       |   GOOGLE GEMINI LIVE ENGINE   |
+                           +-----------------------+       |  (gemini-3.1-flash-live)      |
+                                     |                     +-------------------------------+
+                       (3) Dial PSTN |                                    ^
+                                     v                                    |
+                           +-----------------------+                      |
+                           |   HOMEOWNER PHONE     |                      |
+                           +-----------------------+                      |
+                                     |                                    |
+                           (4) Call Answered                              |
+                                     |                                    |
+                                     v                                    |
+                           +-----------------------+                      |
+                           | TELNYX PREMIUM AMD    |                      |
+                           | (Machine vs Human)    |                      |
+                           +-----------------------+                      |
+                                  /          \                            |
+                     [MACHINE]   /            \   [HUMAN ANSWERED]        |
+                                v              v                          |
+                   +----------------+    +--------------------------------+
+                   | VOICEMAIL DROP |    | BI-DIRECTIONAL AUDIO BRIDGE    |
+                   | OR HANGUP      |    | Telnyx WS <---> Gemini Live WS |================
+                   +----------------+    | (8kHz PCMU <-> 16k/24k PCM)    |
+                                         +--------------------------------+
+
+
++--------------------------------------------------------------------------------------------------+
+|                            3. THE CORE TELEPHONY PROBLEM & AUDIO CODEC BRIDGE                    |
++--------------------------------------------------------------------------------------------------+
+
+Telephony (PSTN / Telnyx) and Gemini Live operate on fundamentally different audio formats and protocols:
+
++----------------------+---------------------------------+-----------------------------------+
+| Attribute            | Telnyx Media Streaming (PSTN)   | Google Gemini Live Standard       |
++----------------------+---------------------------------+-----------------------------------+
+| Protocol             | WebSocket (Telnyx Media Stream) | WebSocket (Google Live API v1beta)|
+| Audio Encoding       | G.711 u-law (PCMU) or L16 PCM   | Linear PCM (16-bit Signed LE)     |
+| Sample Rate (Input)  | 8,000 Hz (8 kHz)                | 16,000 Hz (16 kHz)                |
+| Sample Rate (Output) | 8,000 Hz (8 kHz)                | 24,000 Hz (24 kHz)                |
+| Channels             | Mono (1 channel)                | Mono (1 channel)                  |
+| Chunk Duration       | 20ms per packet (160 bytes)     | Streaming chunks (~2048 samples)  |
+| Packet Format        | JSON wrapper with base64 payload| JSON / Protobuf inlineData base64 |
++----------------------+---------------------------------+-----------------------------------+
+
+TELNYX WEBSOCKET PACKET FORMAT:
+-------------------------------
+Inbound from Telnyx to Relay Server:
+```json
+{
+  "event": "media",
+  "sequence_number": "42",
+  "stream_id": "71b2390a-2b72-4bbf-9310-863a8a30cf40",
+  "call_control_id": "v3:W85b-xyz...",
+  "media": {
+    "track": "inbound_track",
+    "chunk": "42",
+    "timestamp": "1710000000120",
+    "payload": "3v39/v7+/..."
+  }
+}
+```
+
+Outbound from Relay Server to Telnyx:
+```json
+{
+  "event": "media",
+  "media": {
+    "payload": "3v39/v7+/..."
+  }
+}
+```
+
+THE DUAL TRANSCODING PIPELINE (MANDATORY BRIDGE):
+-------------------------------------------------
+
+1. INBOUND CALL AUDIO (Homeowner -> Gemini Live):
+   [Homeowner Speaks on Phone]
+          |
+          v (8kHz G.711 u-law base64 packet, 20ms = 160 bytes)
+   [Telnyx Media Stream WebSocket]
+          |
+          v (Base64 Decode)
+   [Raw 8kHz u-law Bytes]
+          |
+          v (u-law Decompression: audioop.ulaw2lin / g711.decode)
+   [8kHz 16-bit Signed Linear PCM]
+          |
+          v (Resampling: Upsample 2x from 8,000Hz to 16,000Hz)
+   [16kHz 16-bit Linear PCM]
+          |
+          v (Base64 Encode)
+   [Gemini Live WebSocket] -> { realtimeInput: { audio: { mimeType: "audio/pcm;rate=16000", data } } }
+
+
+2. OUTBOUND AGENT AUDIO (Gemini Live -> Homeowner):
+   [Gemini Live WebSocket] -> serverContent.modelTurn.parts[].inlineData (24kHz PCM base64)
+          |
+          v (Base64 Decode)
+   [24kHz 16-bit Signed Linear PCM]
+          |
+          v (Resampling: Downsample 3x from 24,000Hz to 8,000Hz)
+   [8kHz 16-bit Linear PCM]
+          |
+          v (u-law Compression: audioop.lin2ulaw / g711.encode)
+   [8kHz G.711 u-law Bytes (160 byte chunks)]
+          |
+          v (Base64 Encode)
+   [Telnyx Media Stream WebSocket] -> { event: "media", media: { payload: base64Chunk } }
+
+
++--------------------------------------------------------------------------------------------------+
+|                            4. DEALING WITH ANSWERING MACHINES (TELNYX AMD)                       |
++--------------------------------------------------------------------------------------------------+
+
+Answering Machine Detection (AMD) is critical in automated outbound real estate calling:
+If unhandled:
+  1. Gemini Live starts pitching ("Hi, this is Sarah from Property Care...") during the voicemail
+     announcement, talking over the carrier recording.
+  2. The prompt ends before the beep, leaving silence and burning carrier reputation.
+  3. Carriers flag your number as "Robocall / Spam Likely" due to instantaneous call disconnects.
+
+----------------------------------------------------------------------------------------------------
+A. TELNYX AMD CONFIGURATION & CALL INITIATION
+----------------------------------------------------------------------------------------------------
+
+When initiating an outbound call via `POST https://api.telnyx.com/v2/calls`, specify Telnyx Premium AMD:
+
+```json
+{
+  "to": "+15553829104",
+  "from": "+15551234567",
+  "connection_id": "726784cd-8854-43cb-b097-f5ecf701c9ab",
+  "answering_machine_detection": "premium",
+  "answering_machine_detection_config": {
+    "total_analysis_time_millis": 5000,
+    "after_greeting_silence_millis": 1200,
+    "between_words_silence_millis": 1000,
+    "greeting_duration_millis": 3500,
+    "initial_silence_millis": 3500,
+    "maximum_number_of_words": 5,
+    "maximum_word_length_millis": 3500,
+    "silence_threshold": 256,
+    "greeting_total_analysis_time_millis": 5000,
+    "greeting_silence_duration_millis": 2000
+  },
+  "stream_url": "wss://your-backend.com/telnyx-media",
+  "stream_track": "both_tracks",
+  "stream_bidirectional_mode": "rtp",
+  "stream_bidirectional_codec": "PCMU",
+  "webhook_url": "https://your-backend.com/api/telnyx/webhooks"
+}
+```
+
+----------------------------------------------------------------------------------------------------
+B. TELNYX WEBHOOK LIFECYCLE & EVENT HANDLING
+----------------------------------------------------------------------------------------------------
+
+Telnyx sends HTTP POST webhooks to your relay server as the call progresses:
+
+1. `call.initiated` & `call.answered`:
+   - Homeowner picked up phone.
+   - Telnyx starts streaming audio to `stream_url` and AMD engine begins acoustic/cadence analysis.
+
+2. `call.machine.premium.detection.ended`:
+   - Telnyx finishes ML analysis.
+   - Webhook payload:
+     ```json
+     {
+       "data": {
+         "event_type": "call.machine.premium.detection.ended",
+         "payload": {
+           "call_control_id": "v3:W85b-xyz...",
+           "result": "human" // Possible values: "human", "machine", "silence", "fax_detected"
+         }
+       }
+     }
+     ```
+   - Strategy:
+     * If `"human"`: Immediately unpause audio bridge and allow Gemini Live to greet the homeowner.
+     * If `"machine"`: Keep Gemini Live audio paused and await greeting end or beep.
+
+3. `call.machine.greeting.ended` & `call.machine.beep.detected`:
+   - Telnyx fires `call.machine.beep.detected` when the answering machine beep tone (800Hz-1000Hz) sounds.
+   - This is the exact frame-accurate trigger to execute Voicemail Drop.
+
+4. `call.hangup`:
+   - Clean up WebSocket connections and save transcript to CRM.
+
+----------------------------------------------------------------------------------------------------
+C. ANSWERING MACHINE ACTION MODES
+----------------------------------------------------------------------------------------------------
+
+MODE 1: HANG UP IMMEDIATELY (Aggressive Lead Generation)
+  - Goal: Save costs and preserve agent bandwidth.
+  - Action: Upon `result: "machine"`, call Telnyx REST Action:
+    `POST https://api.telnyx.com/v2/calls/{call_control_id}/actions/hangup`
+  - Log CRM: Mark lead status as "Voicemail / No Answer", schedule retry in 4 hours.
+
+MODE 2: PERFECT VOICEMAIL DROP (Relationship Building & Callback Generation)
+  - Goal: Leave a crisp, natural, personalized 15-second message that triggers high callback rates.
+  - Flow:
+    1. Telnyx fires `call.machine.beep.detected`.
+    2. Relay server sends Gemini Live prompt injection:
+       "The call reached voicemail. Speak aloud Sarah's voicemail message:
+        'Hi, this is Sarah from Property Care regarding your property at {{address}}.
+         We are preparing cash offers in your neighborhood this week.
+         Please give me a call back at 555-0192 when you get this. Thanks!'"
+    3. Gemini Live generates speech; audio streams directly to Telnyx WebSocket.
+    4. Upon Gemini `turnComplete: true`, relay backend issues Telnyx hangup command:
+       `POST https://api.telnyx.com/v2/calls/{call_control_id}/actions/hangup`
+
+
++--------------------------------------------------------------------------------------------------+
+|                            5. TELNYX CALL CONTROL V2 DIRECT RELAY VS VOCODE                      |
++--------------------------------------------------------------------------------------------------+
+
+There are two primary architectural pathways for connecting Telnyx to Gemini Live:
+
+====================================================================================================
+PATHWAY A: DIRECT TELNYX CALL CONTROL V2 RELAY (HIGHLY RECOMMENDED)
+====================================================================================================
+Why Direct Relay is Superior for Gemini Live:
+  - Gemini Live is a NATIVE MULTIMODAL SPEECH-TO-SPEECH model (Audio In -> Neural Think -> Audio Out).
+  - Frameworks like standard Vocode introduce 3 separate stages:
+    (1) STT (Deepgram) -> (2) LLM (OpenAI) -> (3) TTS (ElevenLabs).
+  - Breaking Gemini Live into separate STT+LLM+TTS stages destroys Gemini Live's sub-500ms voice intonation,
+    natural pauses, accent adaptation, and native thinking mode.
+  - Telnyx Call Control v2 Media Streaming pipes PSTN audio directly into a lightweight WebSocket bridge,
+    which feeds Google's `BidiGenerateContent` WebSocket directly.
+
+Direct Relay Flow:
+  [Homeowner Phone] <---(PSTN)---> [Telnyx Voice Gateway]
+                                          |
+                                          | (8kHz PCMU WebSocket)
+                                          v
+                              [Node / Python Relay Server]
+                               (Audioop / Resampler Bridge)
+                                          ^
+                                          | (16k / 24k Linear PCM WebSocket)
+                                          v
+                              [Google Gemini Live Engine]
+
+
+====================================================================================================
+PATHWAY B: VOCODE INTEGRATION WITH TELNYX
+====================================================================================================
+If you want to use the Vocode open-source ecosystem (`vocode-python`):
+  1. Vocode provides telephony connectors for Twilio, Vonage, and custom WebSockets.
+  2. To integrate Telnyx with Vocode, configure Telnyx TeXML to point to Vocode's webhook endpoint,
+     OR use Telnyx Call Control v2 streaming action directed to Vocode's media WebSocket.
+  3. To use Gemini Live inside Vocode, you must replace Vocode's `BaseTranscriber`, `BaseAgent`,
+     and `BaseSynthesizer` with a custom `GeminiLiveTelephonyAgent` that tunnels raw audio packets
+     directly to Google's Live API.
+
+
++--------------------------------------------------------------------------------------------------+
+|                            6. INTEGRATING WITH OUR CURRENT PROJECT                               |
++--------------------------------------------------------------------------------------------------+
+
+Our current frontend project is a modern React + TypeScript application (`c:\local retail ai`):
+  - Visual Node Script Editor Canvas (`NodeCanvas.tsx`)
+  - Real-time Lead Extraction & CRM Blackboard (`LeadExtractor.ts`)
+  - AI Engine & Model Control Hub (`ModelControlHub.tsx`)
+  - Gemini Live WebSocket Service (`geminiLiveService.ts`)
+
+HOW TO CONNECT TELNYX TELEPHONY INTO THIS APP:
+---------------------------------------------
+
+1. ADD "TELEPHONY / TELNYX" CONFIGURATION TO MODEL CONTROL HUB:
+   - In `src/components/ModelControlHub.tsx`, add a 4th tab: "Telephony Outbound (Telnyx PSTN)".
+   - Configuration fields:
+     * Telnyx API Key (`KEY01...`)
+     * Telnyx Connection ID / Call Control App ID (`726784cd-...`)
+     * Telnyx Outbound Phone Number (`+1...`)
+     * Target Lead / Homeowner Phone Number
+     * AMD Strategy selector: [Hangup on Machine | Leave Voicemail Drop | Wait for Human]
+     * Voicemail Script template string
+
+2. LIGHTWEIGHT TELEPHONY BACKEND SERVICE (`server/telnyxRelay.ts` or `relay.py`):
+   - Location: Subfolder `server/` or standalone Node/Python process.
+   - Endpoints:
+     * `POST /api/telephony/call`:
+       Receives `{ to: "+15553829104", prompt: "...", voice: "Aoede" }`.
+       Triggers Telnyx Call Control v2 API to dial the destination number.
+     * `POST /api/telephony/webhooks`:
+       Receives Telnyx events: `call.answered`, `call.machine.premium.detection.ended`,
+       `call.machine.beep.detected`, `call.hangup`.
+     * `WSS /telnyx-media`:
+       WebSocket endpoint accepting Telnyx bidirectional media streaming packets.
+       Performs real-time transcoding between PCMU (8kHz) and Linear PCM (16kHz / 24kHz).
+
+3. REAL-TIME FRONTEND CRM & CANVAS MONITORING:
+   - When a real outbound phone call is active:
+     * Relay backend broadcasts Gemini Live's real-time transcript to the React app over a local WebSocket.
+     * React app's `TranscriptView.tsx` updates live as homeowner and AI speak!
+     * `LeadExtractor.ts` extracts address, bedrooms, bathrooms, and price from the phone conversation.
+     * Canvas nodes highlight dynamically as the call transitions from Greeting to Qualification!
+
+
++--------------------------------------------------------------------------------------------------+
+|                            7. COMPLETE STEP-BY-STEP CHECKLIST & ROADMAP                          |
++--------------------------------------------------------------------------------------------------+
+
+Phase 1: Telnyx Portal & Credentials Setup
+  [ ] Create account at portal.telnyx.com.
+  [ ] Generate Telnyx V2 API Key (under API Keys).
+  [ ] Purchase local voice phone number matching target market area code (e.g. Austin 512).
+  [ ] Create a Call Control Application in Telnyx Portal and assign the phone number to it.
+  [ ] Complete A2P 10DLC and STIR/SHAKEN registration to ensure high call answer rates.
+
+Phase 2: Build the Audio Transcoding Gateway (Telnyx <-> Gemini Live)
+  [ ] Implement u-law (PCMU) 8kHz <-> Linear PCM 16k/24k transcoding pipeline in backend relay.
+  [ ] Establish bidirectional WebSocket relay between Telnyx Media Stream and Google Live API.
+  [ ] Add 20ms audio frame packetizer to ensure smooth telephony transmission without stutter.
+
+Phase 3: Implement Telnyx Premium AMD & Beep Detection
+  [ ] Enable `answering_machine_detection: "premium"` in outbound call initiation.
+  [ ] Handle `call.machine.premium.detection.ended` webhook to branch between Human and Machine.
+  [ ] Listen for `call.machine.beep.detected` to trigger instant, frame-accurate Voicemail Drop.
+
+Phase 4: Connect with Frontend Apex App
+  [ ] Add Telnyx credentials and outbound dialer UI to `ModelControlHub.tsx` & `CallHero.tsx`.
+  [ ] Stream live call transcripts from relay backend to `TranscriptView.tsx`.
+  [ ] Enable real-time CRM updates in `LeadCard.tsx` from real phone conversations.
+
+====================================================================================================
+End of Specification & Architectural Guide
+====================================================================================================

@@ -96,4 +96,51 @@ A clean, easy-to-read chronological record of problems identified, root causes, 
 
 ---
 
-*Last Updated: August 2026*
+## 📌 Milestone 9: Gemini 3.1 Flash Live Integration (Native Speech-to-Speech + Thinking Mode)
+* **🐛 The Problem**: Previous architecture relied on a fragmented, multi-stage pipeline (`Web Speech API STT` ➔ `Cloud LPU LLM` ➔ `Browser SpeechSynthesis TTS`). This created unavoidable roundtrip latency, robotic browser voices, disjointed pauses, and lacked the ability for the model to natively process audio intonation or perform native thinking on speech input.
+* **🛠️ The Fix**: Built a native bidirectional WebSocket streaming architecture powered by **Google Gemini 3.1 Flash Live Preview (`gemini-3.1-flash-live-preview`)**:
+  1. **Bidirectional WebSocket Pipeline (`GeminiLiveService.ts`)**:
+     * Connects directly to `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent`.
+     * Negotiates initial `setup` frame specifying `models/gemini-3.1-flash-live-preview`, `responseModalities: ["AUDIO"]`, voice persona (`Aoede`, `Puck`, `Charon`, `Fenrir`, `Kore`), and real-time audio transcription configs.
+  2. **Live 16kHz PCM Audio Ingestion**:
+     * Captures browser microphone via Web Audio API, dynamically resamples to 16kHz Int16 Little-Endian mono PCM, and streams live base64 audio chunks via `{ realtimeInput: { audio: { mimeType: 'audio/pcm;rate=16000', data } } }`.
+  3. **High-Fidelity 24kHz Native Audio Playback & Jitter Queue**:
+     * Receives raw 24kHz 16-bit PCM chunks in `serverContent.modelTurn.parts` (`inlineData.data`).
+     * Decodes and schedules jitter-free playback via Web Audio API `AudioBufferSourceNode` connected directly to the pulsing `analyserNode` visualizer.
+  4. **Native Audio Thinking Engine**:
+     * Implements configurable `thinkingConfig.thinkingLevel` (`minimal`, `low`, `medium`, `high`) allowing Gemini to perform deep reasoning on seller objections before and during speech delivery.
+  5. **Instant Barge-in Interruption**:
+     * Listens for `serverContent.interrupted === true` from Gemini Live; automatically aborts active audio sources and flushes the playback queue the exact millisecond the user interrupts.
+  6. **Real-Time CRM & Transcript Sync**:
+     * Streams user speech via `inputTranscription` and agent speech via `outputTranscription`.
+     * Automatically feeds live transcripts into `LeadExtractor.extractLeadInfo()` to update seller name, property specifications, asking price, closing timeline, and qualification score in real time.
+---
+
+## 📌 Milestone 10: Elimination of Old Windows Voice TTS Leakage + Unified Model Control Hub
+* **🐛 The Problem**:
+  1. When testing calls with Gemini Live selected and an API key provided, the user still heard the old robotic Windows browser voice (`SpeechSynthesis`) instead of Gemini Live's native 24kHz neural voice (`Aoede`/`Puck`/`Charon`).
+  2. Investigation revealed three root causes:
+     * **Protocol Schema Mismatch**: `geminiLiveService.ts` attempted to send text triggers via `{ realtimeInput: { text } }` which is invalid in the Gemini Live WebSocket API (`BidiGenerateContent`). The API requires `{ clientContent: { turns: [{ role: 'user', parts: [{ text }] }], turnComplete: true } }`. Because of this, the server ignored the prompt and never sent audio chunks.
+     * **Test Drawer TTS Fallback**: The canvas test drawer (`FlowTestSimulator.tsx`) called `SpeechService.speak()` which triggered `window.speechSynthesis`.
+     * **Unsynchronized Audio Completion**: The server sent `turnComplete` hundreds of milliseconds before the queued 24kHz audio buffers actually finished playing through the speakers, causing turn collision.
+  3. Model configuration was hidden away in a secondary modal rather than being conveniently accessible on the sidebar.
+* **🛠️ The Fix**:
+  1. **Strict Zero-TTS Guard (`speechService.ts`)**:
+     * Added an ironclad check in `SpeechService.speak()` that immediately returns if `config.provider === 'gemini_live'`, completely eliminating browser `SpeechSynthesis` and Windows voices.
+  2. **Compliant WebSocket `clientContent` Messages (`geminiLiveService.ts`)**:
+     * Rewrote greeting trigger and `sendRealtimeText()` to use official Google BidiGenerateContent `clientContent` turn format with `turnComplete: true`.
+     * Added resilient model string handling: ensures model begins with `models/` and defaults smoothly to `gemini-2.0-flash-exp` / `gemini-3.1-flash-live-preview`.
+     * Added audio buffer playback synchronization: `onTurnComplete` now waits until `nextPlaybackTime - audioContext.currentTime` completes before releasing the turn.
+  3. **Unified Side Model Control Hub (`ModelControlHub.tsx`)**:
+     * Built a dedicated control card placed prominently on the left sidebar in `App.tsx` above `CallHero`.
+     * **Gemini Live Tab**: Configure live voice model (`gemini-2.0-flash-exp`, `gemini-3.1-flash-live-preview`), prebuilt voice (`Aoede`, `Puck`, `Charon`, `Fenrir`, `Kore`), Google Gemini API key (with show/hide and validation badge), and reasoning thinking depth (`minimal`, `low`, `medium`, `high`).
+     * **Groq Cloud Tab**: Configure text-based LPU models (`llama-3.3-70b-versatile`, `openai/gpt-oss-20b`), Groq API key, and browser TTS voices.
+     * **Local Ollama Tab**: Configure offline endpoint and local model tags.
+  4. **Canvas Test Call Drawer Engine Integration (`FlowTestSimulator.tsx`)**:
+     * Added a direct 1-click engine switch (`Gemini Live` vs `Groq Text`) and voice selector directly inside the test drawer header with inline API key entry.
+* **✅ Result**: Test calls and live sessions speak strictly using Gemini Live's crystal-clear 24kHz neural audio with zero Windows voice leakage, and all model settings are centralized in one convenient place on the side.
+
+---
+
+*Last Updated: September 2026*
+

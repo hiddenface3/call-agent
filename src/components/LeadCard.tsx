@@ -77,7 +77,7 @@ ${
 
   const tableRows = [
     {
-      tag: '{{client_name}}',
+      tag: 'client_name',
       label: 'Client Name',
       value: lead.sellerName,
       placeholder: 'Listening for caller name...',
@@ -85,7 +85,7 @@ ${
       color: 'text-blue-300',
     },
     {
-      tag: '{{property_details}}',
+      tag: 'property_details',
       label: 'Property Details',
       value: lead.propertyDetails,
       placeholder: 'e.g. 2 bed 2 bath house...',
@@ -93,7 +93,7 @@ ${
       color: 'text-emerald-300 font-semibold',
     },
     {
-      tag: '{{callback_time}}',
+      tag: 'callback_time',
       label: 'Callback Time',
       value: lead.callbackTime,
       placeholder: 'e.g. Tomorrow at 2:00 PM',
@@ -101,7 +101,7 @@ ${
       color: 'text-cyan-300 font-semibold',
     },
     {
-      tag: '{{asking_price}}',
+      tag: 'asking_price',
       label: 'Asking Price',
       value: lead.askingPrice,
       placeholder: 'Pending discussion...',
@@ -109,7 +109,7 @@ ${
       color: 'text-emerald-400 font-mono font-bold',
     },
     {
-      tag: '{{property_address}}',
+      tag: 'property_address',
       label: 'Property Address',
       value: lead.propertyAddress,
       placeholder: 'Listening for address...',
@@ -117,7 +117,7 @@ ${
       color: 'text-purple-300',
     },
     {
-      tag: '{{condition}}',
+      tag: 'condition',
       label: 'Repairs & Condition',
       value: lead.condition !== 'Unknown' ? lead.condition : '',
       placeholder: 'Repairs / TLC status...',
@@ -125,7 +125,7 @@ ${
       color: 'text-amber-300',
     },
     {
-      tag: '{{timeline}}',
+      tag: 'timeline',
       label: 'Selling Timeline',
       value: lead.timeline !== 'Unknown' ? lead.timeline : '',
       placeholder: 'Immediate / 1-3 Months...',
@@ -133,7 +133,7 @@ ${
       color: 'text-teal-300',
     },
     {
-      tag: '{{motivation}}',
+      tag: 'reason_for_selling',
       label: 'Seller Motivation',
       value: lead.reasonForSelling,
       placeholder: 'Reason for selling...',
@@ -266,7 +266,7 @@ ${
                             <Sparkles className="w-3.5 h-3.5 text-indigo-400" />
                             <span className="font-medium text-indigo-300 capitalize">{customKey.replace(/_/g, ' ')}</span>
                           </div>
-                          <span className="text-[9px] font-mono text-indigo-400/80 block mt-0.5">{`{{${customKey}}}`}</span>
+                          <span className="text-[9px] font-mono text-indigo-400/80 block mt-0.5">{customKey}</span>
                         </td>
                         <td className="py-2 px-2.5 align-middle">
                           <span className="text-indigo-200 font-medium select-text">{customVal}</span>

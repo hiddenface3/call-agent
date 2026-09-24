@@ -1,4 +1,4 @@
-import { ChatMessage, QualifiedLead, FlowNode } from '../shared/types';
+import { ChatMessage, QualifiedLead, FlowNode, AgentConfig } from '../shared/types';
 
 export class LeadExtractor {
   /**
@@ -141,11 +141,22 @@ export class LeadExtractor {
       }
     }
 
-    // 9. Extract Asking Price
+    // 9. Extract Asking Price or Refusal
     if (!updated.askingPrice || updated.askingPrice.includes('Pending')) {
-      const priceMatch = fullUserDialogue.match(/\$(?:[0-9]{1,3},?)+(?:k|K|,\d{3})?|\b\d{2,4}\s*(?:k|K|thousand|hundred thousand)\b|\b(?:around|about|close to|under|over)\s*\$?\d{2,4}k?\b|\b(?:\d{1,3}\s*(?:million|m))\b/i);
-      if (priceMatch) {
-        updated.askingPrice = priceMatch[0].trim();
+      if (
+        lowerAll.includes('not going to give') ||
+        lowerAll.includes('not giving you my price') ||
+        lowerAll.includes('no price') ||
+        lowerAll.includes('refuse to give') ||
+        lowerAll.includes('wont give you my price') ||
+        lowerAll.includes('not telling you my price')
+      ) {
+        updated.askingPrice = 'Declined to disclose';
+      } else {
+        const priceMatch = fullUserDialogue.match(/\$(?:[0-9]{1,3},?)+(?:k|K|,\d{3})?|\b\d{2,4}\s*(?:k|K|thousand|hundred thousand)\b|\b(?:around|about|close to|under|over)\s*\$?\d{2,4}k?\b|\b(?:\d{1,3}\s*(?:million|m))\b/i);
+        if (priceMatch) {
+          updated.askingPrice = priceMatch[0].trim();
+        }
       }
     }
 
@@ -155,12 +166,20 @@ export class LeadExtractor {
         updated.customFields = {};
       }
       for (const node of nodes) {
+        // Collect targetVariable or any legacy {{var}} matches
+        const varList: string[] = [];
+        if (node.targetVariable) {
+          varList.push(node.targetVariable.toLowerCase());
+        }
         const matches = node.agentPrompt.matchAll(/\{\{([a-zA-Z0-9_\s-]+)\}\}/g);
         for (const m of matches) {
-          const varName = m[1].trim().toLowerCase();
+          varList.push(m[1].trim().toLowerCase());
+        }
+
+        for (const varName of varList) {
           // Skip standard recognized keys handled above
           if (
-            ['client_name', 'client names', 'seller_name', 'property_details', 'property specs', 'callback_time', 'asking_price', 'timeline', 'condition', 'property_address'].includes(varName)
+            ['client_name', 'client names', 'seller_name', 'property_details', 'property specs', 'callback_time', 'asking_price', 'timeline', 'condition', 'property_address', 'reason_for_selling', 'motivation'].includes(varName)
           ) {
             continue;
           }
@@ -263,6 +282,205 @@ export class LeadExtractor {
 
     updated.extractedAt = new Date().toLocaleString();
     return updated;
+  }
+
+  /**
+   * Intelligently extract lead fields and node-level CRM variables using the AI Brain (Groq or Gemini).
+   * Runs with true AI reasoning in JSON mode with zero guesswork. Recognizes complex homeowner intent,
+   * price refusal ("No, I told you I am not going to give you my price" -> "Declined to disclose"),
+   * scheduling requests ("Ah! Yes. Call me 9:00 p.m." -> "Tomorrow at 9:00 PM"), property specs, condition,
+   * and custom variables connected to each flow node.
+   */
+  static async extractLeadWithAi(
+    messages: ChatMessage[],
+    currentLead: QualifiedLead,
+    currentNode: FlowNode | null,
+    allNodes: FlowNode[],
+    config: AgentConfig
+  ): Promise<QualifiedLead> {
+    if (messages.length === 0) return currentLead;
+
+    // Collect all expected variables from all nodes in current workflow
+    const targetVariablesList = allNodes
+      .filter((n) => n.targetVariable)
+      .map((n) => ({
+        key: n.targetVariable!,
+        label: n.targetVariableLabel || n.targetVariable!,
+        nodeTitle: n.title,
+      }));
+
+    const currentTarget = currentNode?.targetVariable
+      ? `${currentNode.targetVariableLabel || currentNode.targetVariable} (${currentNode.targetVariable})`
+      : 'None (General discussion)';
+
+    const conversationTranscript = messages
+      .map((m) => `${m.sender === 'user' ? 'HOMEOWNER/CUSTOMER' : 'AGENT'}: ${m.text}`)
+      .join('\n');
+
+    const systemPrompt = `You are an elite Real Estate CRM Intelligence Extraction AI.
+Analyze this live conversation transcript between an acquisition agent and a homeowner.
+Extract and update all structured CRM variables with 100% accuracy.
+
+ACTIVE WORKFLOW CONTEXT:
+- Currently active flow node: "${currentNode?.title || 'Unknown'}"
+- Target CRM variable for this active step: ${currentTarget}
+- All configured workflow variables across nodes:
+${targetVariablesList.map((v) => `  * ${v.key}: ${v.label} (from "${v.nodeTitle}")`).join('\n')}
+
+EXTRACTION RULES:
+1. Asking Price (askingPrice):
+   - If homeowner gives a price or ballpark (e.g. "$350k", "around 400 thousand"), extract clean formatted string (e.g. "$350,000").
+   - If homeowner explicitly refuses or declines to give price (e.g. "I am not going to give you my price", "Make me an offer first", "You called me"), set askingPrice to "Declined to disclose".
+   - If not mentioned yet, preserve current value.
+2. Callback Time (callbackTime):
+   - If homeowner agrees to a callback or provides a time/day (e.g. "Ah! Yes. Call me 9:00 p.m.", "Tomorrow at 2", "Friday afternoon"), format cleanly (e.g. "Tomorrow at 9:00 PM" or "9:00 PM").
+3. Selling Timeline (timeline):
+   - Map to: 'Immediate (0-30 days)' | '1-3 Months' | '3-6 Months' | 'Just Exploring' | 'Unknown' (e.g. "the two weeks" -> "Immediate (0-30 days)").
+4. Property Details (propertyDetails):
+   - Extract bedroom, bathroom count, square footage, and style (e.g. "3 Bed / 2 Bath Ranch", "2 bedroom 2 bathrooms").
+5. Condition & Repairs (condition):
+   - Map to: 'Move-in Ready' | 'Needs Minor TLC' | 'Heavy Fixer' | 'Distressed' | 'Unknown'.
+6. Seller Name (sellerName):
+   - Extract homeowner's name if stated.
+7. Property Address (propertyAddress):
+   - Extract address or location if mentioned.
+8. Reason for Selling (reasonForSelling):
+   - Extract seller motivation (e.g. "Relocation", "Tired landlord", "Downsizing", "Cash equity").
+9. Custom Workflow Variables (customFields):
+   - For any additional custom variable connected to a node (e.g. loan_balance, monthly_rent, roof_age, tenant_status), extract the customer's answer into the customFields object.
+10. Qualification Score & Deal Status:
+   - qualificationScore: number 0-100.
+   - dealStatus: 'Hot Lead' | 'Warm Follow-Up' | 'Nurture' | 'Disqualified'.
+
+Output format: Return ONLY valid JSON matching this schema:
+{
+  "sellerName": string,
+  "propertyDetails": string,
+  "askingPrice": string,
+  "callbackTime": string,
+  "timeline": "Immediate (0-30 days)" | "1-3 Months" | "3-6 Months" | "Just Exploring" | "Unknown",
+  "condition": "Move-in Ready" | "Needs Minor TLC" | "Heavy Fixer" | "Distressed" | "Unknown",
+  "propertyAddress": string,
+  "propertyType": "Single Family" | "Multi Family" | "Condo/Townhouse" | "Commercial" | "Unknown",
+  "reasonForSelling": string,
+  "customFields": Record<string, string>,
+  "qualificationScore": number,
+  "dealStatus": "Hot Lead" | "Warm Follow-Up" | "Nurture" | "Disqualified"
+}`;
+
+    const groqKey = (config.groqApiKey || (import.meta as any).env?.VITE_GROQ_API_KEY || '').trim();
+    const geminiKey = (config.geminiApiKey || (import.meta as any).env?.VITE_GEMINI_API_KEY || '').trim();
+
+    try {
+      if (groqKey) {
+        const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${groqKey}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            model: 'openai/gpt-oss-120b',
+            response_format: { type: 'json_object' },
+            temperature: 0.1,
+            messages: [
+              { role: 'system', content: systemPrompt },
+              { role: 'user', content: `Current Lead:\n${JSON.stringify(currentLead)}\n\nTranscript:\n${conversationTranscript}` },
+            ],
+          }),
+        });
+
+        if (response.ok) {
+          const data = await response.json();
+          const content = data.choices?.[0]?.message?.content;
+          if (content) {
+            const parsed = JSON.parse(content);
+            return LeadExtractor.mergeAiLeadData(currentLead, parsed);
+          }
+        }
+      }
+
+      if (geminiKey) {
+        const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${encodeURIComponent(geminiKey)}`;
+        const response = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            systemInstruction: { parts: [{ text: systemPrompt }] },
+            contents: [{
+              role: 'user',
+              parts: [{ text: `Current Lead:\n${JSON.stringify(currentLead)}\n\nTranscript:\n${conversationTranscript}\n\nReturn JSON only.` }]
+            }],
+            generationConfig: {
+              responseMimeType: 'application/json',
+              temperature: 0.1,
+            }
+          })
+        });
+
+        if (response.ok) {
+          const data = await response.json();
+          const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
+          if (text) {
+            const parsed = JSON.parse(text);
+            return LeadExtractor.mergeAiLeadData(currentLead, parsed);
+          }
+        }
+      }
+    } catch (err) {
+      console.warn('AI Brain extraction encountered an error, keeping baseline lead data:', err);
+    }
+
+    return LeadExtractor.extractLeadInfo(messages, currentLead, allNodes);
+  }
+
+  /**
+   * Safely merge AI-extracted parameters into the current lead state
+   */
+  static mergeAiLeadData(current: QualifiedLead, aiData: any): QualifiedLead {
+    if (!aiData || typeof aiData !== 'object') return current;
+
+    const merged: QualifiedLead = {
+      ...current,
+      sellerName: aiData.sellerName && typeof aiData.sellerName === 'string' && aiData.sellerName.trim() && !aiData.sellerName.includes('Pending')
+        ? aiData.sellerName.trim()
+        : current.sellerName,
+      propertyDetails: aiData.propertyDetails && typeof aiData.propertyDetails === 'string' && aiData.propertyDetails.trim()
+        ? aiData.propertyDetails.trim()
+        : current.propertyDetails,
+      propertyAddress: aiData.propertyAddress && typeof aiData.propertyAddress === 'string' && aiData.propertyAddress.trim() && !aiData.propertyAddress.includes('Pending')
+        ? aiData.propertyAddress.trim()
+        : current.propertyAddress,
+      propertyType: aiData.propertyType && aiData.propertyType !== 'Unknown'
+        ? aiData.propertyType
+        : current.propertyType,
+      condition: aiData.condition && aiData.condition !== 'Unknown'
+        ? aiData.condition
+        : current.condition,
+      askingPrice: aiData.askingPrice && typeof aiData.askingPrice === 'string' && aiData.askingPrice.trim()
+        ? aiData.askingPrice.trim()
+        : current.askingPrice,
+      callbackTime: aiData.callbackTime && typeof aiData.callbackTime === 'string' && aiData.callbackTime.trim()
+        ? aiData.callbackTime.trim()
+        : current.callbackTime,
+      timeline: aiData.timeline && aiData.timeline !== 'Unknown'
+        ? aiData.timeline
+        : current.timeline,
+      reasonForSelling: aiData.reasonForSelling && typeof aiData.reasonForSelling === 'string' && aiData.reasonForSelling.trim()
+        ? aiData.reasonForSelling.trim()
+        : current.reasonForSelling,
+      qualificationScore: typeof aiData.qualificationScore === 'number' && aiData.qualificationScore > 0
+        ? aiData.qualificationScore
+        : current.qualificationScore,
+      dealStatus: aiData.dealStatus || current.dealStatus,
+      customFields: {
+        ...(current.customFields || {}),
+        ...(aiData.customFields || {}),
+      },
+      extractedAt: new Date().toLocaleString(),
+    };
+
+    return merged;
   }
 
   /**

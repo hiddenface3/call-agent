@@ -10,7 +10,9 @@ import {
 import { SpeechService } from '../../services/speechService';
 import { OllamaService, getCleanScriptSpeech } from '../../services/ollamaService';
 import { LeadExtractor } from '../../services/leadExtractor';
+import { GeminiLiveService } from '../../services/geminiLiveService';
 import { AudioVisualizer } from '../AudioVisualizer';
+import { GEMINI_LIVE_VOICES } from '../../shared/constants';
 import {
   PhoneCall,
   PhoneOff,
@@ -42,6 +44,8 @@ import {
   HelpCircle,
   Copy,
   Check,
+  Key,
+  ChevronDown,
 } from 'lucide-react';
 
 interface FlowTestSimulatorProps {
@@ -52,6 +56,7 @@ interface FlowTestSimulatorProps {
   onHighlightEdge: (sourceNodeId: string, targetNodeId: string) => void;
   onClose: () => void;
   config: AgentConfig;
+  onUpdateConfig?: (newConfig: AgentConfig) => void;
 }
 
 export const FlowTestSimulator: React.FC<FlowTestSimulatorProps> = ({
@@ -62,12 +67,15 @@ export const FlowTestSimulator: React.FC<FlowTestSimulatorProps> = ({
   onHighlightEdge,
   onClose,
   config,
+  onUpdateConfig,
 }) => {
   // Call State
   const [callStatus, setCallStatus] = useState<CallStatus>('idle');
+  const [inlineKey, setInlineKey] = useState<string>('');
   const [callDuration, setCallDuration] = useState<number>(0);
   const [isMuted, setIsMuted] = useState<boolean>(false);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [streamingAgentText, setStreamingAgentText] = useState<string>('');
   const [currentInterimText, setCurrentInterimText] = useState<string>('');
   const [analyserNode, setAnalyserNode] = useState<AnalyserNode | null>(null);
   const [inputText, setInputText] = useState<string>('');
@@ -203,11 +211,48 @@ export const FlowTestSimulator: React.FC<FlowTestSimulatorProps> = ({
    */
   const handleProcessUserSpeech = useCallback(
     async (userText: string) => {
-      if (!userText.trim() || isTurnBusyRef.current || SpeechService.isSpeaking()) return;
+      if (!userText.trim() || isTurnBusyRef.current) return;
+      if (configRef.current.provider !== 'gemini_live' && SpeechService.isSpeaking()) return;
       isTurnBusyRef.current = true;
 
       if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
       setCurrentInterimText('');
+
+      // If running on Gemini Live native speech-to-speech
+      if (configRef.current.provider === 'gemini_live') {
+        const userMsg: ChatMessage = {
+          id: `user-${Date.now()}`,
+          sender: 'user',
+          text: userText.trim(),
+          timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
+          currentNodeId: activeNodeIdRef.current,
+        };
+
+        const updatedHistory = [...messagesRef.current, userMsg];
+        setMessages(updatedHistory);
+        setCallStatus('thinking');
+        const baselineLead = LeadExtractor.extractLeadInfo(updatedHistory, lead, callFlowRef.current.nodes);
+        setLead(baselineLead);
+
+        const currentActiveNode =
+          callFlowRef.current.nodes.find((n) => n.id === activeNodeIdRef.current) ||
+          callFlowRef.current.nodes[0] ||
+          null;
+
+        LeadExtractor.extractLeadWithAi(
+          updatedHistory,
+          baselineLead,
+          currentActiveNode,
+          callFlowRef.current.nodes,
+          configRef.current
+        ).then((aiLead) => {
+          setLead((prevLead: QualifiedLead) => LeadExtractor.mergeAiLeadData(prevLead, aiLead));
+        }).catch((e) => console.warn('Background AI lead extraction failed:', e));
+
+        GeminiLiveService.sendRealtimeText(userText);
+        isTurnBusyRef.current = false;
+        return;
+      }
 
       const userMsg: ChatMessage = {
         id: `user-${Date.now()}`,
@@ -221,13 +266,24 @@ export const FlowTestSimulator: React.FC<FlowTestSimulatorProps> = ({
       setMessages(updatedHistory);
       setCallStatus('thinking');
 
-      // Live Lead Variable Extraction
-      setLead((prevLead: QualifiedLead) => LeadExtractor.extractLeadInfo(updatedHistory, prevLead, callFlowRef.current.nodes));
+      // Live Lead Variable Extraction (baseline + background AI brain)
+      const baselineLead = LeadExtractor.extractLeadInfo(updatedHistory, lead, callFlowRef.current.nodes);
+      setLead(baselineLead);
 
       const currentNode =
         callFlowRef.current.nodes.find((n) => n.id === activeNodeIdRef.current) ||
         callFlowRef.current.nodes[0] ||
         null;
+
+      LeadExtractor.extractLeadWithAi(
+        updatedHistory,
+        baselineLead,
+        currentNode,
+        callFlowRef.current.nodes,
+        configRef.current
+      ).then((aiLead) => {
+        setLead((prevLead: QualifiedLead) => LeadExtractor.mergeAiLeadData(prevLead, aiLead));
+      }).catch((e) => console.warn('Background AI lead extraction failed:', e));
 
       await OllamaService.generateStreamingResponse(
         updatedHistory,
@@ -256,8 +312,20 @@ export const FlowTestSimulator: React.FC<FlowTestSimulatorProps> = ({
           const fullHistoryWithAgent = [...updatedHistory, agentMsg];
           setMessages(fullHistoryWithAgent);
 
-          // Re-extract lead info after agent turn
-          setLead((prevLead: QualifiedLead) => LeadExtractor.extractLeadInfo(fullHistoryWithAgent, prevLead, callFlowRef.current.nodes));
+          // Re-extract lead info after agent turn with AI Brain
+          setLead((prevLead: QualifiedLead) => {
+            const baseline = LeadExtractor.extractLeadInfo(fullHistoryWithAgent, prevLead, callFlowRef.current.nodes);
+            LeadExtractor.extractLeadWithAi(
+              fullHistoryWithAgent,
+              baseline,
+              currentNode,
+              callFlowRef.current.nodes,
+              configRef.current
+            ).then((aiLead) => {
+              setLead((p: QualifiedLead) => LeadExtractor.mergeAiLeadData(p, aiLead));
+            }).catch((e) => console.warn('Background AI lead extraction failed:', e));
+            return baseline;
+          });
 
           // Unlock turn
           isTurnBusyRef.current = false;
@@ -313,7 +381,102 @@ export const FlowTestSimulator: React.FC<FlowTestSimulatorProps> = ({
       onActiveNodeChange(initialNode.id);
     }
 
-    // Init Mic Analyser
+    // Gemini Live Native Speech-to-Speech Engine
+    if (configRef.current.provider === 'gemini_live') {
+      try {
+        const analyser = await GeminiLiveService.startSession(
+          configRef.current,
+          flow,
+          initialNode,
+          {
+            onConnected: () => {
+              setCallStatus('speaking');
+            },
+            onDisconnected: () => {
+              setCallStatus('ended');
+            },
+            onError: (err) => {
+              console.error('Gemini Live error in Test Simulator:', err);
+              alert(err);
+              setCallStatus('ended');
+            },
+            onUserTranscript: (text, isInterim) => {
+              if (isInterim) {
+                setCurrentInterimText(text);
+              } else {
+                setCurrentInterimText('');
+                const userMsg: ChatMessage = {
+                  id: `user-${Date.now()}`,
+                  sender: 'user',
+                  text: text.trim(),
+                  timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
+                  currentNodeId: activeNodeIdRef.current,
+                };
+                setMessages((prev) => {
+                  const updated = [...prev, userMsg];
+                  setLead((prevLead) => LeadExtractor.extractLeadInfo(updated, prevLead, flow.nodes));
+                  return updated;
+                });
+                setCallStatus('thinking');
+              }
+            },
+            onAgentTranscript: (text) => {
+              setCallStatus('speaking');
+              setStreamingAgentText((prev) => prev + text);
+            },
+            onTurnComplete: () => {
+              setStreamingAgentText((fullText) => {
+                if (fullText.trim()) {
+                  const agentMsg: ChatMessage = {
+                    id: `agent-${Date.now()}`,
+                    sender: 'agent',
+                    text: fullText.trim(),
+                    timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
+                    currentNodeId: activeNodeIdRef.current,
+                  };
+                  setMessages((prev) => {
+                    const updated = [...prev, agentMsg];
+                    const baselineLead = LeadExtractor.extractLeadInfo(updated, lead, flow.nodes);
+                    setLead(baselineLead);
+
+                    const currentActiveNode =
+                      flow.nodes.find((n) => n.id === activeNodeIdRef.current) ||
+                      flow.nodes[0] ||
+                      null;
+
+                    LeadExtractor.extractLeadWithAi(
+                      updated,
+                      baselineLead,
+                      currentActiveNode,
+                      flow.nodes,
+                      configRef.current
+                    ).then((aiLead) => {
+                      setLead((prevLead: QualifiedLead) => LeadExtractor.mergeAiLeadData(prevLead, aiLead));
+                    }).catch((e) => console.warn('Background AI lead extraction failed:', e));
+
+                    return updated;
+                  });
+                }
+                return '';
+              });
+              setCallStatus('listening');
+            },
+            onInterrupted: () => {
+              setCallStatus('listening');
+              setStreamingAgentText('');
+            },
+          }
+        );
+        setAnalyserNode(analyser);
+        return;
+      } catch (err: any) {
+        console.error('Failed to start Gemini Live in Test Simulator:', err);
+        setCallStatus('ended');
+        return;
+      }
+    }
+
+    // Default: Groq / Ollama STT + TTS Pipeline
     const analyser = await SpeechService.initAudioAnalyser();
     setAnalyserNode(analyser);
 
@@ -362,12 +525,16 @@ export const FlowTestSimulator: React.FC<FlowTestSimulatorProps> = ({
    */
   const handleEndCall = () => {
     isTurnBusyRef.current = false;
+    if (configRef.current.provider === 'gemini_live') {
+      GeminiLiveService.stopSession();
+    }
     SpeechService.stopListening();
     SpeechService.stopSpeaking();
     SpeechService.stopAudioAnalyser();
     setAnalyserNode(null);
     setCallStatus('ended');
     setCurrentInterimText('');
+    setStreamingAgentText('');
     if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
   };
 
@@ -375,6 +542,13 @@ export const FlowTestSimulator: React.FC<FlowTestSimulatorProps> = ({
    * Toggle Mute
    */
   const handleToggleMute = () => {
+    if (configRef.current.provider === 'gemini_live') {
+      const muted = GeminiLiveService.toggleMute();
+      setIsMuted(muted);
+      isMutedRef.current = muted;
+      return;
+    }
+
     if (isMuted) {
       setIsMuted(false);
       isMutedRef.current = false;
@@ -400,6 +574,35 @@ export const FlowTestSimulator: React.FC<FlowTestSimulatorProps> = ({
     }
   };
 
+  const handleSwitchEngine = (provider: 'gemini_live' | 'groq') => {
+    if (!onUpdateConfig) return;
+    const newModel = provider === 'gemini_live'
+      ? (config.model.includes('gemini') ? config.model : 'gemini-2.0-flash-exp')
+      : (config.model.includes('gemini') ? 'llama-3.3-70b-versatile' : config.model);
+    onUpdateConfig({
+      ...config,
+      provider,
+      model: newModel,
+    });
+  };
+
+  const handleUpdateVoice = (voice: 'Aoede' | 'Puck' | 'Charon' | 'Fenrir' | 'Kore') => {
+    if (!onUpdateConfig) return;
+    onUpdateConfig({
+      ...config,
+      geminiLiveVoice: voice,
+    });
+  };
+
+  const handleSaveInlineKey = () => {
+    if (!inlineKey.trim() || !onUpdateConfig) return;
+    onUpdateConfig({
+      ...config,
+      geminiApiKey: inlineKey.trim(),
+    });
+    setInlineKey('');
+  };
+
   if (!isOpen) return null;
 
   return (
@@ -419,7 +622,16 @@ export const FlowTestSimulator: React.FC<FlowTestSimulatorProps> = ({
                 <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
               )}
             </h3>
-            <p className="text-[10px] text-slate-500">Live Voice STT + Neural TTS + Real-Time Flow</p>
+            <p className="text-[10px] text-slate-500 flex items-center gap-1">
+              {config.provider === 'gemini_live' ? (
+                <span className="text-cyan-700 font-bold flex items-center gap-1">
+                  <Sparkles className="w-3 h-3 text-cyan-600" />
+                  Gemini Live ({config.geminiLiveVoice || 'Aoede'} 24kHz Native)
+                </span>
+              ) : (
+                <span>Groq LPU / Web Speech STT + TTS</span>
+              )}
+            </p>
           </div>
         </div>
 
@@ -438,6 +650,75 @@ export const FlowTestSimulator: React.FC<FlowTestSimulatorProps> = ({
             <X className="w-4 h-4" />
           </button>
         </div>
+      </div>
+
+      {/* Quick Model Engine Configuration Bar */}
+      <div className="px-3.5 py-2 bg-slate-900 border-b border-slate-800 text-xs">
+        <div className="flex items-center justify-between gap-2">
+          {/* Toggle Engine */}
+          <div className="flex items-center p-0.5 rounded-lg bg-slate-950 border border-slate-800">
+            <button
+              onClick={() => handleSwitchEngine('gemini_live')}
+              className={`px-2.5 py-1 rounded-md text-[10px] font-bold flex items-center gap-1 transition ${
+                config.provider === 'gemini_live'
+                  ? 'bg-cyan-600 text-white shadow-xs'
+                  : 'text-slate-400 hover:text-slate-200'
+              }`}
+            >
+              <Sparkles className="w-3 h-3 text-cyan-300" />
+              <span>Gemini Live</span>
+            </button>
+            <button
+              onClick={() => handleSwitchEngine('groq')}
+              className={`px-2.5 py-1 rounded-md text-[10px] font-bold flex items-center gap-1 transition ${
+                config.provider === 'groq'
+                  ? 'bg-amber-600 text-white shadow-xs'
+                  : 'text-slate-400 hover:text-slate-200'
+              }`}
+            >
+              <Zap className="w-3 h-3 text-amber-300" />
+              <span>Groq Text</span>
+            </button>
+          </div>
+
+          {/* Voice Selector if Gemini Live */}
+          {config.provider === 'gemini_live' ? (
+            <select
+              value={config.geminiLiveVoice || 'Aoede'}
+              onChange={(e) => handleUpdateVoice(e.target.value as any)}
+              className="bg-slate-950 border border-slate-700 text-cyan-300 font-semibold text-[10px] rounded-lg px-2 py-1 focus:outline-none"
+            >
+              {GEMINI_LIVE_VOICES.map((v) => (
+                <option key={v.id} value={v.id} className="bg-slate-900 text-white">
+                  Voice: {v.id}
+                </option>
+              ))}
+            </select>
+          ) : (
+            <span className="text-[10px] text-slate-400">Windows TTS</span>
+          )}
+        </div>
+
+        {/* API Key prompt if missing */}
+        {config.provider === 'gemini_live' && !config.geminiApiKey && (
+          <div className="mt-2 p-2 rounded-lg bg-amber-950/50 border border-amber-700/60 flex items-center gap-1.5">
+            <Key className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+            <input
+              type="password"
+              value={inlineKey}
+              onChange={(e) => setInlineKey(e.target.value)}
+              placeholder="Paste Google Gemini API Key..."
+              className="flex-1 bg-slate-950 border border-amber-600/50 rounded px-2 py-0.5 text-[10px] text-white focus:outline-none font-mono"
+            />
+            <button
+              onClick={handleSaveInlineKey}
+              disabled={!inlineKey.trim()}
+              className="px-2 py-0.5 rounded bg-amber-600 hover:bg-amber-500 text-white font-bold text-[10px] disabled:opacity-40 shrink-0"
+            >
+              Save Key
+            </button>
+          </div>
+        )}
       </div>
 
       {/* Live Voice Call Hero Card (Compact for Canvas Drawer) */}
@@ -698,14 +979,14 @@ export const FlowTestSimulator: React.FC<FlowTestSimulatorProps> = ({
               </thead>
               <tbody className="divide-y divide-slate-100 text-[11px]">
                 {[
-                  { tag: '{{client_name}}', label: 'Client Name', value: lead.sellerName, icon: <User className="w-3 h-3 text-blue-500" /> },
-                  { tag: '{{property_details}}', label: 'Property Details', value: lead.propertyDetails, icon: <Home className="w-3 h-3 text-emerald-500" /> },
-                  { tag: '{{callback_time}}', label: 'Callback Time', value: lead.callbackTime, icon: <Calendar className="w-3 h-3 text-cyan-500" /> },
-                  { tag: '{{asking_price}}', label: 'Asking Price', value: lead.askingPrice, icon: <DollarSign className="w-3 h-3 text-emerald-600" /> },
-                  { tag: '{{property_address}}', label: 'Property Address', value: lead.propertyAddress, icon: <MapPin className="w-3 h-3 text-purple-500" /> },
-                  { tag: '{{condition}}', label: 'Condition', value: lead.condition !== 'Unknown' ? lead.condition : '', icon: <Wrench className="w-3 h-3 text-amber-500" /> },
-                  { tag: '{{timeline}}', label: 'Timeline', value: lead.timeline !== 'Unknown' ? lead.timeline : '', icon: <Clock className="w-3 h-3 text-teal-500" /> },
-                  { tag: '{{motivation}}', label: 'Motivation', value: lead.reasonForSelling, icon: <HelpCircle className="w-3 h-3 text-indigo-500" /> },
+                  { tag: 'client_name', label: 'Client Name', value: lead.sellerName, icon: <User className="w-3 h-3 text-blue-500" /> },
+                  { tag: 'property_details', label: 'Property Details', value: lead.propertyDetails, icon: <Home className="w-3 h-3 text-emerald-500" /> },
+                  { tag: 'callback_time', label: 'Callback Time', value: lead.callbackTime, icon: <Calendar className="w-3 h-3 text-cyan-500" /> },
+                  { tag: 'asking_price', label: 'Asking Price', value: lead.askingPrice, icon: <DollarSign className="w-3 h-3 text-emerald-600" /> },
+                  { tag: 'property_address', label: 'Property Address', value: lead.propertyAddress, icon: <MapPin className="w-3 h-3 text-purple-500" /> },
+                  { tag: 'condition', label: 'Condition', value: lead.condition !== 'Unknown' ? lead.condition : '', icon: <Wrench className="w-3 h-3 text-amber-500" /> },
+                  { tag: 'timeline', label: 'Timeline', value: lead.timeline !== 'Unknown' ? lead.timeline : '', icon: <Clock className="w-3 h-3 text-teal-500" /> },
+                  { tag: 'reason_for_selling', label: 'Motivation', value: lead.reasonForSelling, icon: <HelpCircle className="w-3 h-3 text-indigo-500" /> },
                 ].map((row, idx) => (
                   <tr key={idx} className="hover:bg-slate-50/80 transition">
                     <td className="py-2 px-2.5 align-top">
@@ -745,7 +1026,7 @@ export const FlowTestSimulator: React.FC<FlowTestSimulatorProps> = ({
                           <Sparkles className="w-3 h-3 text-indigo-600" />
                           <span className="font-semibold text-indigo-900 text-[10px] capitalize">{cKey}</span>
                         </div>
-                        <span className="text-[9px] font-mono text-indigo-500 block">{`{{${cKey}}}`}</span>
+                        <span className="text-[9px] font-mono text-indigo-500 block">{cKey}</span>
                       </td>
                       <td className="py-2 px-2.5 align-middle">
                         <span className="font-semibold text-indigo-900 select-text">{String(cVal)}</span>

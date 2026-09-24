@@ -1,0 +1,274 @@
+====================================================================================================
+           APEX VOICE AI — GEMINI 3.1 FLASH LIVE BIDIRECTIONAL SPEECH ARCHITECTURE
+                                   COMPREHENSIVE MIND MAP & SYSTEM SPEC
+====================================================================================================
+
++--------------------------------------------------------------------------------------------------+
+|                                     1. HIGH-LEVEL SYSTEM MIND MAP                                |
++--------------------------------------------------------------------------------------------------+
+
+                                     [ USER / HOMEOWNER ]
+                                     /                  \
+                     (User Speaks)  /                    \  (Hears 24kHz Audio)
+                                   v                      \
+                       +----------------------+            +-----------------------+
+                       |  Browser Microphone  |            |   Browser Speakers    |
+                       +----------------------+            +-----------------------+
+                                   |                                   ^
+                                   | (Raw Float32 Stream)              | (24kHz Web Audio)
+                                   v                                   |
+                       +----------------------+            +-----------------------+
+                       |   Web Audio Context  |            | Jitter Buffer & Queue |
+                       | (Resample to 16kHz)  |            | (AudioBufferSource)   |
+                       +----------------------+            +-----------------------+
+                                   |                                   ^
+                                   | (16-bit PCM Little Endian)        | (24kHz PCM Chunks)
+                                   v                                   |
+                       +----------------------+            +-----------------------+
+                       | Base64 Frame Encoder |            | Base64 Frame Decoder  |
+                       +----------------------+            +-----------------------+
+                                   |                                   ^
+                                   | realtimeInput.audio               | modelTurn.parts[].inlineData
+                                   v                                   |
+                ===================================================================
+                ||          BIDIRECTIONAL WEBSOCKET CONNECTION (WSS)             ||
+                ||   wss://generativelanguage.googleapis.com/.../BidiGenerateContent||
+                ===================================================================
+                                   |                                   ^
+                                   v                                   |
+                      +-----------------------------------------------------+
+                      |       GOOGLE GEMINI 3.1 FLASH LIVE ENGINE           |
+                      |        [gemini-3.1-flash-live-preview]              |
+                      +-----------------------------------------------------+
+                                 /            |             \
+                                /             |              \
+                               v              v               v
+                +-----------------+  +------------------+  +-----------------+
+                | Native Acoustic |  |  Native Thinking |  |  Native Neural  |
+                | Audio Ingestion |  |  Engine (Low)    |  |  Audio Synth    |
+                | (16kHz Stream)  |  |  (Deep Reasoning)|  |  (24kHz Stream) |
+                +-----------------+  +------------------+  +-----------------+
+                                              |
+                                              v
+                              +--------------------------------+
+                              | Live Server Side Transcriptions |
+                              | - inputTranscription (User)    |
+                              | - outputTranscription (Sarah)  |
+                              | - interrupted (Barge-in Cut)   |
+                              +--------------------------------+
+                                              |
+                                              v (JSON Events over WebSocket)
+                               +------------------------------+
+                               |     APEX REACT CRM & UI      |
+                               | - Real-time Chat Transcript  |
+                               | - LeadExtractor Slot Parsing |
+                               | - Holographic Audio Ring     |
+                               +------------------------------+
+
+
++--------------------------------------------------------------------------------------------------+
+|                                  2. PROTOCOL & MESSAGE FRAMEWORK                                 |
++--------------------------------------------------------------------------------------------------+
+
+A. INITIAL SESSION HANDSHAKE (Client -> Server)
+-----------------------------------------------
+Immediately upon WebSocket connection open, client sends single setup object:
+{
+  "setup": {
+    "model": "models/gemini-3.1-flash-live-preview",
+    "generationConfig": {
+      "responseModalities": ["AUDIO"],
+      "speechConfig": {
+        "voiceConfig": {
+          "prebuiltVoiceConfig": {
+            "voiceName": "Aoede"   // [Aoede, Puck, Charon, Fenrir, Kore]
+          }
+        }
+      },
+      "thinkingConfig": {
+        "thinkingLevel": "low"      // [minimal, low, medium, high]
+      },
+      "temperature": 0.6
+    },
+    "systemInstruction": {
+      "parts": [{ "text": "<COMPILED_REAL_ESTATE_CALL_FLOW_RULES>" }]
+    },
+    "inputAudioTranscription": {},
+    "outputAudioTranscription": {}
+  }
+}
+
+Server replies:
+{ "setupComplete": {} }
+
+
+B. REAL-TIME MICROPHONE STREAMING (Client -> Server)
+---------------------------------------------------
+While user talks, microphone audio is sliced into ~2048 sample buffers, downsampled
+from AudioContext rate (44.1k/48k) to 16,000 Hz, converted to 16-bit Int16 PCM, and sent:
+{
+  "realtimeInput": {
+    "audio": {
+      "mimeType": "audio/pcm;rate=16000",
+      "data": "<BASE64_PCM_AUDIO_CHUNK>"
+    }
+  }
+}
+
+
+C. REAL-TIME NATIVE AUDIO PLAYBACK (Server -> Client)
+-----------------------------------------------------
+Gemini Live processes input audio directly through the neural weights, thinks, and streams
+24,000 Hz 16-bit PCM audio back:
+{
+  "serverContent": {
+    "modelTurn": {
+      "parts": [
+        {
+          "inlineData": {
+            "mimeType": "audio/pcm;rate=24000",
+            "data": "<BASE64_24K_AUDIO_CHUNK>"
+          }
+        }
+      ]
+    }
+  }
+}
+
+
+D. CLIENT CONTENT PROMPTING & GREETING TRIGGER (Client -> Server)
+-----------------------------------------------------------------
+To inject text prompts, trigger opening greetings, or send homeowner simulator turns,
+Gemini Live requires the official turn message schema:
+{
+  "clientContent": {
+    "turns": [
+      {
+        "role": "user",
+        "parts": [{ "text": "<PROMPT_OR_SIMULATED_USER_SPEECH>" }]
+      }
+    ],
+    "turnComplete": true
+  }
+}
+* Note: Sending via realtimeInput.text is deprecated/unsupported in BidiGenerateContent.
+  Using clientContent guarantees the model generates real-time 24kHz audio in response.
+
+
+E. REAL-TIME TRANSCRIPTIONS & SLOT SYNC (Server -> Client)
+----------------------------------------------------------
+Gemini server broadcasts synchronized text without requiring an external speech-to-text model:
+- User Words:  serverContent.inputTranscription.text
+- Agent Words: serverContent.outputTranscription.text
+
+These text tokens are routed into:
+1. UI Transcript Stream: App.tsx messages array.
+2. Lead Extractor Engine: LeadExtractor.ts regex slot blackboard.
+   - Extracts: Seller Name, Phone, Address, Bedrooms, Bathrooms, Condition, Asking Price, Timeline.
+   - Dynamically calculates lead score (0-100%) and categorizes status (Hot / Warm / Nurture).
+
+
+F. INSTANT BARGE-IN INTERRUPTION (Server -> Client)
+---------------------------------------------------
+When the homeowner interrupts Sarah while she is speaking:
+1. Gemini VAD detects speech in the incoming 16kHz audio stream.
+2. Server emits: { "serverContent": { "interrupted": true } }
+3. GeminiLiveService.stopPlaybackQueue() triggers:
+   - Immediately stops all active AudioBufferSourceNode instances.
+   - Clears pending chunk buffers.
+   - UI status switches from 'speaking' back to 'listening'.
+
+
++--------------------------------------------------------------------------------------------------+
+|                            3. COMPONENT INTEGRATION MATRIX                                       |
++--------------------------------------------------------------------------------------------------+
+
+File                              Role & Functionality
+--------------------------------  ------------------------------------------------------------------
+src/services/geminiLiveService.ts Core WebSocket client, 16kHz mic downsampler, 24kHz audio player,
+                                  audio queue scheduler, clientContent turn protocol, and transcription bus.
+
+src/components/ModelControlHub.tsx Dedicated 1-click side configuration panel placed above CallHero:
+                                  - Gemini Live Tab: Voice selector, live model, API key & thinking level.
+                                  - Groq Cloud Tab: Text-based LPU models, Groq key & Windows TTS voice.
+                                  - Local Ollama Tab: Offline PC endpoint & model tags.
+
+src/components/NodeEditor/
+FlowTestSimulator.tsx             Canvas Test Call Simulator with embedded model switcher bar,
+                                  1-click Gemini Live / Groq toggle, and direct voice selector.
+
+src/services/speechService.ts     Added strict guard preventing browser SpeechSynthesis from firing
+                                  when provider is 'gemini_live', eliminating Windows voice leakage.
+
+src/shared/types.ts               Added 'gemini_live' to AgentConfig.provider, geminiApiKey,
+                                  geminiLiveVoice ('Aoede'|'Puck'|'Charon'|'Fenrir'|'Kore'),
+                                  and thinkingLevel ('minimal'|'low'|'medium'|'high').
+
+src/shared/constants.ts           Set gemini-3.1-flash-live-preview / gemini-2.0-flash-exp models,
+                                  exported GEMINI_LIVE_VOICES registry with voice profiles.
+
+src/components/AgentSettingsModal.tsx Overhauled modal with dedicated tabs for Gemini Live vs Groq vs Ollama.
+
+src/components/Navbar.tsx         Added live status indicators displaying active Gemini Live voice
+                                  persona, 16kHz native STT input, and 24kHz native TTS output.
+
+src/App.tsx                       Seamlessly routes handleStartCall(), handleProcessUserSpeech(),
+                                  handleEndCall(), handleToggleMute(), and handleInterrupt() through
+                                  GeminiLiveService with live lead extraction and visualizer piping.
+
+FIXES.md                          Documented Milestones 9 & 10 technical fixes, architecture, and validation.
+
+
++--------------------------------------------------------------------------------------------------+
+|                            4. STEP-BY-STEP LIVE TESTING INSTRUCTIONS                             |
++--------------------------------------------------------------------------------------------------+
+
+Step 1: Open Project in Browser
+-------------------------------
+1. Dev server is running at: http://localhost:5173/
+2. Open http://localhost:5173/ in Google Chrome, Microsoft Edge, or Brave.
+
+Step 2: Enter Gemini API Key
+----------------------------
+1. Click the "Config" button (Gear icon) in the top right navbar.
+2. Under "AI Voice & Reasoning Engine", select the first tab:
+   "Gemini Live (Native Audio)".
+3. In "Google Gemini API Key", enter your Gemini API Key (starts with AIzaSy...).
+4. (Optional) Choose your preferred voice:
+   - Aoede: Warm, engaging, expressive female voice (Recommended for real estate).
+   - Puck: Energetic, youthful male voice.
+   - Charon: Calm, deep, authoritative male voice.
+   - Fenrir: Confident, direct male voice.
+   - Kore: Gentle, professional female voice.
+5. Click "Test API Connection" -> verify green checkmark ("API Connected!").
+6. Click "Save Configuration".
+
+Step 3: Start Live Phone Call
+-----------------------------
+1. Click "Start Call" (Green phone button).
+2. Allow microphone access when prompted by the browser.
+3. Speak naturally into your microphone:
+   "Hi Sarah, I'm calling about my house at 742 Evergreen Terrace. It's a 3 bedroom, 2 bath."
+4. Observe:
+   - The central holographic ring pulses to Gemini's 24kHz native spoken voice.
+   - User words appear in the transcript via Gemini Live inputTranscription.
+   - Agent words appear in the transcript via Gemini Live outputTranscription.
+   - The Lead Card on the right updates with Address, 3 Beds / 2 Baths, and Lead Score.
+
+Step 4: Test Interruption (Barge-in)
+------------------------------------
+1. While Sarah is talking, speak loudly into your microphone:
+   "Wait, hold on a second Sarah!"
+2. Verify:
+   - Sarah's voice stops instantly with zero audio stutter or lag.
+   - Gemini processes the interruption and immediately responds to what you just said.
+
+Step 5: Test Caller Simulator Injection
+----------------------------------------
+1. Under "Test Caller Simulator", click "Motivated Seller (Willing to Sell)".
+2. Click any of the prebuilt scenario lines.
+3. Verify Gemini Live ingests the text, reasons, and speaks the response with natural voice intonation.
+
+====================================================================================================
+End of Mind Map Specification
+====================================================================================================
